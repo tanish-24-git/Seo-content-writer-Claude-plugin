@@ -1,0 +1,37 @@
+{
+  "$comment": "The canonical per-page extraction schema. page-extractor writes one file like this per page. Keep field names stable — build_report.py and gap-analyst depend on them.",
+  "url": "",
+  "brand": "",
+  "is_ours": false,
+  "page_type": "product|blog|comparison|faq|calculator|other",
+  "title": "",
+  "meta_description": "",
+  "h1": "",
+  "outline": [{ "level": 2, "text": "" }],
+  "sections": [
+    {
+      "heading": "",
+      "level": 2,
+      "summary": "",
+      "word_count": 0,
+      "has_example": false,
+      "has_table": false,
+      "has_image": false
+    }
+  ],
+  "faqs": [{ "question": "", "answer": "" }],
+  "examples": [{ "context": "", "figures": "" }],
+  "tables": [{ "title": "", "rows": 0, "cols": 0, "note": "" }],
+  "internal_links": [{ "anchor": "", "target": "", "kind": "plan|guide|calculator|claim|other" }],
+  "features_or_riders": [""],
+  "numbers": [""],
+  "schema_types": [""],
+  "author": "",
+  "reviewer": "",
+  "published_date": "",
+  "modified_date": "",
+  "word_count_total": 0,
+  "readability_note": "",
+  "extraction_status": "full|fallback_requests|manual_paste|blocked",
+  "notes": []
+}

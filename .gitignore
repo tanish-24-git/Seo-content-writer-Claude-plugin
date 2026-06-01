@@ -1,0 +1,62 @@
+# ─────────────────────────────────────────────────────────────────────
+# Hardened .gitignore — keep this plugin repo clean.
+# Run outputs, databases, secrets and heavy artefacts must NEVER be committed.
+# ─────────────────────────────────────────────────────────────────────
+
+# ── Plugin run outputs (generated per analysis in the user's working dir) ─
+content-gap-runs/
+runs/
+*.run/
+report.html
+report.pdf
+report.xlsx
+report.csv
+*-blocks.json
+clusters.json
+gaps.json
+
+# ── Databases (so nothing here can ever crash on a committed DB) ─────────
+*.sqlite
+*.sqlite3
+*.db
+*.sql
+*.dump
+_db_backups/
+
+# ── Secrets / credentials ────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*token*.json
+*secret*.json
+service-account*.json
+credentials.json
+
+# ── Python ───────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+*.egg-info/
+
+# ── Node (if any tooling is added later) ──────────────────────────────────
+node_modules/
+dist/
+*.tsbuildinfo
+
+# ── Editor / OS ────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ── Claude Code local session cache ────────────────────────────────────────
+.claude/projects/
+.claude/todos/
+.claude/statsig/
+.claude/shell-snapshots/
