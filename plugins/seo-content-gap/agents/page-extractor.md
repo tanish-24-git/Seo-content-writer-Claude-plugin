@@ -25,9 +25,11 @@ internal/external)**, tables, JSON-LD schema types, images/alt, and word count:
 python "${CLAUDE_PLUGIN_ROOT}/scripts/extract_page.py" "<url>" "<out_path>"
 ```
 (try `python`, then `python3`). Then **Read `<out_path>`** — that JSON now holds the accurate
-structural fields. These are the source of truth for `heading_counts`, `heading_outline`,
-`internal_links`, `internal_link_count`, `unique_internal_targets`, `external_link_count`,
-`tables_count`, `schema_types`, `word_count_total`, `image_count`.
+structural fields. These are the source of truth for `heading_counts`, `heading_outline`, **`sections` (each
+heading with its actual body text)**, `internal_links`, `external_links`, **`images` (src + alt)**,
+`internal_link_count`, `unique_internal_targets`, `external_link_count`, `tables_count`,
+`schema_types`, `word_count_total`, `image_count`. Keep the `sections` text — the report shows
+the real content each page wrote.
 
 If the parser wrote `extraction_status: "blocked"` (HTTP 403 / network error), go to Step 1b.
 

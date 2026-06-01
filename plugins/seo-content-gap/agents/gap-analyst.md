@@ -41,6 +41,16 @@ Give each a **priority 1–3** = (how many competitors have it) × (intent value
 Compute coverage_pct (clusters we cover ÷ clusters anyone covers), counts per gap type,
 our vs competitor-median word count, and a per-brand quality row.
 
+## Step 5 — Ranking view + external-brand mentions (per page)
+For each page, using the extracted content + quality signals, add:
+- **ranking_assessment**: one or two plain sentences on (a) `google` — how a Google search crawler
+  would likely rank this page for the topic (consider depth, structure, schema, E-E-A-T author/
+  reviewer, freshness, internal links, examples), and (b) `ai_search` — how an AI answer engine
+  (ChatGPT / Gemini / Perplexity) would likely treat/cite it (consider clear extractable answers,
+  FAQ + schema, definitions, tables, concrete numbers).
+- **external_brands**: list any external brands / companies / third parties **named in the page's
+  content** (competitor names, partners, rating agencies, regulators, tools). Empty list if none.
+
 ## Output — write TWO files into `run_dir`
 **clusters.json**
 ```json
@@ -62,7 +72,9 @@ our vs competitor-median word count, and a per-brand quality row.
   "faq_gaps": [{"question": "", "answered_by": [""]}],
   "link_gaps": [{"topic_or_target": "", "present_in": [""]}],
   "quality": {"per_brand": {"OUR PAGE": {"word_count": 0, "h2": 0, "faqs": 0,
-               "internal_links": 0, "schema": [""], "eeat": false, "freshness": ""}}}
+               "internal_links": 0, "schema": [""], "eeat": false, "freshness": ""}}},
+  "ranking_assessment": {"OUR PAGE": {"google": "", "ai_search": ""}},
+  "external_brands": {"OUR PAGE": [""]}
 }
 ```
 

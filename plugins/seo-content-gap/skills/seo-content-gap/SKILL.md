@@ -64,8 +64,13 @@ Work inside the user's current directory. Create a run folder:
 Show the user, in chat:
 - The **ranking line** (who ranks, where they rank).
 - A compact **cluster-coverage matrix** (markdown table: clusters × brands, ✓/✗).
+- For the 2–3 biggest gaps, a **side-by-side** of what the top competitor wrote vs us (real text)
+  with the **content-similarity** note (near-duplicate / reworded / distinct).
 - The **top 5 prioritised gaps** as one-liners.
-- Where the files are: `report.html` (open → Print → Save as PDF), `report.xlsx`, `report.md`.
+- Where the files are: `report.html` (rich: side-by-side content, similarity, ranking view,
+  per-page H1/H2/H3 + link + image lists, clickable section deep-links; open → Print → Save as
+  PDF), `report.xlsx` (Full Content + Section Comparison + separate H1/H2/H3 + Links + Images +
+  Ranking + External Brands sheets), `report.md`.
 - A one-line reminder they can now **chat** to dig in.
 
 ## Stage 6 — Conversational session (stay open)

@@ -3,6 +3,25 @@
 All notable changes to the SEO Content-Gap plugin are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] — 2026-06-02
+### Added — "show the real content, not just a score"
+- `extract_page.py` now also captures the **actual body text under every heading** (`sections[].text`)
+  and **every image** (src + alt), plus a separate **external_links** list.
+- Report shows, per topic cluster, a **side-by-side of what each page actually wrote** (real text
+  excerpts), each with its **depth**, a **deep-link that opens that exact section on the live page**
+  (Chrome text-fragment), and an in-report anchor (click a cluster in the map to jump to it).
+- **Content-similarity scoring** (difflib): for each cluster it reports how similar the wording is
+  across pages (near-duplicate / reworded / distinct) — answers "is everyone's content the same?".
+- **Ranking view** per page: how a Google search crawler and an AI answer engine would likely
+  treat/cite it. **External-brand mentions** per page (which third parties each page names).
+- XLSX is now the full content workbook: **Full Content** (every section + text), **Section
+  Comparison** (per cluster, each page's text + similarity-to-ours), separate **H1 / H2 / H3**
+  sheets, **Internal Links**, **External Links**, **Images**, **Ranking View**, **External Brands**,
+  plus Gaps / FAQ / Quality — all filterable, wrapped text.
+### Changed
+- gap-analyst emits `ranking_assessment` + `external_brands`; build_report pulls verbatim section
+  text from the page JSONs and computes similarity deterministically.
+
 ## [0.2.0] — 2026-06-02
 ### Added
 - `scripts/extract_page.py` — deterministic, standard-library HTML parser that extracts the

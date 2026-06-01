@@ -1,30 +1,35 @@
 #!/usr/bin/env python3
-"""Build the visual report for a content-gap run.
+"""Build the visual + spreadsheet report for a content-gap run.
 
-Input : a run directory containing meta.json, clusters.json, gaps.json and the
-        per-page block JSONs (our.json + competitor-*.json), each with accurate
-        heading_outline + internal_links (from extract_page.py).
-Output: report.html  (KPI cards, cluster matrix, SVG charts, per-page H1/H2/H3
-                      outline, real internal-link tables, filterable gap table.
-                      Open in a browser, Print -> Save as PDF)
-        report.xlsx  (Overview/KPIs, Cluster Matrix, Page Structure, Internal Links,
-                      Gaps, FAQ Gaps, Link Gaps, Quality — all with auto-filters)
-                      if `openpyxl` is installed, else CSV fallback.
+Reads a run directory (meta.json, clusters.json, gaps.json, our.json,
+competitor-*.json) and produces:
 
-HTML needs no third-party dependency (charts are hand-rolled SVG, no CDN).
+  report.html  — a rich, self-contained page (no CDN): KPI cards, cluster
+                 coverage diagram, per-cluster SIDE-BY-SIDE of what each page
+                 actually wrote, content-similarity scoring, per-page H1/H2/H3
+                 lists, internal/external link tables, image lists, ranking view,
+                 external-brand mentions. Every section deep-links to the live
+                 page (Chrome text-fragment) and has an in-report anchor.
+  report.xlsx  — every piece of content in filterable sheets: Full Content,
+                 Section Comparison, Similarity, H1/H2/H3, Internal/External
+                 Links, Images, Ranking, External Brands, Gaps, FAQ, Quality.
+                 (CSV fallback if openpyxl is missing.)
+
+Standard library only for the HTML (similarity uses difflib). XLSX needs openpyxl.
 Usage: python build_report.py <run_dir>
 """
 import csv
+import difflib
 import html
 import json
 import os
 import sys
+from urllib.parse import quote
 
 
 # ----------------------------- load -----------------------------------------
 def _load(path, default):
     try:
-        # utf-8-sig tolerates a BOM (some Windows tools add one).
         with open(path, "r", encoding="utf-8-sig") as fh:
             return json.load(fh)
     except Exception:
@@ -49,14 +54,53 @@ def brand_order(meta, gaps, pages):
         b = p.get("brand")
         if b and b not in order:
             order.append(b)
-    for b in gaps.get("competitors", []):
-        if b not in order:
-            order.append(b)
     return your, order
 
 
 def esc(x):
     return html.escape(str(x if x is not None else ""))
+
+
+def page_by_brand(pages):
+    return {p.get("brand"): p for p in pages}
+
+
+# --------------------- content helpers (the new value) ----------------------
+def best_section(page, cluster_name):
+    """Pick the page section whose heading best matches the cluster name."""
+    best, score = None, 0.0
+    cn = (cluster_name or "").lower()
+    for s in page.get("sections", []):
+        r = difflib.SequenceMatcher(None, cn, (s.get("heading") or "").lower()).ratio()
+        if r > score:
+            best, score = s, r
+    return best if score >= 0.34 else None
+
+
+def similarity(a, b):
+    a = (a or "")[:2500].lower()
+    b = (b or "")[:2500].lower()
+    if not a or not b:
+        return 0.0
+    return round(difflib.SequenceMatcher(None, a, b).ratio() * 100)
+
+
+def sim_verdict(pct):
+    if pct >= 80:
+        return "near-duplicate"
+    if pct >= 55:
+        return "same idea, reworded"
+    if pct >= 30:
+        return "loosely related"
+    return "distinct"
+
+
+def textfrag(url, heading):
+    """Deep-link that opens the live page scrolled to this heading (Chrome)."""
+    if not url:
+        return "#"
+    frag = quote((heading or "")[:120])
+    return f"{url}#:~:text={frag}" if frag else url
 
 
 # ----------------------------- svg chart ------------------------------------
@@ -71,195 +115,217 @@ def svg_bar(title, pairs, unit=""):
     for i, (label, val) in enumerate(pairs):
         y = top + i * (bar_h + gap)
         w = int((val / mx) * (width - left - 80))
-        rows.append(
-            f'<text x="0" y="{y + 15}" class="lbl">{esc(label[:26])}</text>'
-            f'<rect x="{left}" y="{y}" width="{max(w,1)}" height="{bar_h}" rx="3" class="bar"/>'
-            f'<text x="{left + max(w,1) + 6}" y="{y + 15}" class="val">{val:g}{unit}</text>'
-        )
+        rows.append(f'<text x="0" y="{y+15}" class="lbl">{esc(label[:26])}</text>'
+                    f'<rect x="{left}" y="{y}" width="{max(w,1)}" height="{bar_h}" rx="3" class="bar"/>'
+                    f'<text x="{left+max(w,1)+6}" y="{y+15}" class="val">{val:g}{unit}</text>')
     return (f'<svg viewBox="0 0 {width} {height}" class="chart" role="img">'
             f'<text x="0" y="16" class="ctitle">{esc(title)}</text>' + "".join(rows) + "</svg>")
 
 
-# ----------------------------- html pieces ----------------------------------
-def outline_html(page):
-    rows = []
-    for h in page.get("heading_outline", [])[:120]:
-        lvl = int(h.get("level", 2) or 2)
-        pad = (lvl - 1) * 18
-        rows.append(f'<div class="ol" style="margin-left:{pad}px"><span class="lvl">H{lvl}</span> {esc(h.get("text"))}</div>')
-    hc = page.get("heading_counts", {})
-    cap = (f'<small>H1:{hc.get("h1",0)} · H2:{hc.get("h2",0)} · H3:{hc.get("h3",0)} · '
-           f'H4+:{hc.get("h4_plus",0)} · words:{page.get("word_count_total",0)}</small>')
-    return cap + "".join(rows) if rows else cap + "<small>(no headings captured)</small>"
-
-
-def links_html(page):
-    links = page.get("internal_links", []) or []
-    cap = (f'<small><b>{page.get("internal_link_count", len(links))}</b> internal links · '
-           f'<b>{page.get("unique_internal_targets","?")}</b> unique targets · '
-           f'{page.get("external_link_count","?")} external</small>')
-    if not links:
-        return cap
-    rows = ["<table><thead><tr><th>Anchor</th><th>Target</th><th>Section</th><th>Scope</th></tr></thead><tbody>"]
-    for l in links[:50]:
-        rows.append(f'<tr><td>{esc(l.get("anchor"))}</td>'
-                    f'<td class="mono">{esc(l.get("href"))}</td>'
-                    f'<td>{esc(l.get("section"))}</td><td>{esc(l.get("scope"))}</td></tr>')
-    rows.append("</tbody></table>")
-    if len(links) > 50:
-        rows.append(f"<small>… {len(links) - 50} more (see report.xlsx → Internal Links)</small>")
-    return cap + "".join(rows)
-
-
 CSS = """
-*{box-sizing:border-box} body{font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif;
- color:#0f172a;max-width:1100px;margin:0 auto;padding:16px 28px;line-height:1.5}
+*{box-sizing:border-box} body{font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#0f172a;max-width:1180px;margin:0 auto;padding:16px 26px;line-height:1.5}
 h1{font-size:24px;border-bottom:3px solid #1e3a8a;padding-bottom:6px;color:#1e3a8a}
-h2{font-size:18px;margin-top:28px;border-bottom:1px solid #cbd5e1;padding-bottom:4px;color:#1e3a8a}
+h2{font-size:18px;margin-top:30px;border-bottom:1px solid #cbd5e1;padding-bottom:4px;color:#1e3a8a}
+h3{font-size:15px;margin:14px 0 4px}
 .kpis{display:flex;flex-wrap:wrap;gap:12px;margin:14px 0}
 .kpi{flex:1 1 140px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:12px 14px}
-.kpi .n{font-size:24px;font-weight:700;color:#1e3a8a} .kpi .l{font-size:12px;color:#475569}
+.kpi .n{font-size:24px;font-weight:700;color:#1e3a8a}.kpi .l{font-size:12px;color:#475569}
 .banner{padding:10px 14px;border-radius:8px;margin:8px 0;font-size:14px}
-.ok{background:#dcfce7;border:1px solid #16a34a;color:#166534}
-.warn{background:#fef3c7;border:1px solid #f59e0b;color:#92400e}
+.ok{background:#dcfce7;border:1px solid #16a34a;color:#166534}.warn{background:#fef3c7;border:1px solid #f59e0b;color:#92400e}
+.toc{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px 14px;font-size:13px}
+.toc a{color:#1e40af;margin-right:14px;text-decoration:none}
 table{border-collapse:collapse;width:100%;font-size:12.5px;margin:6px 0}
 th,td{border:1px solid #cbd5e1;padding:4px 7px;text-align:left;vertical-align:top}
-th{background:#eef2ff} .matrix td{text-align:center;font-weight:600}
+th{background:#eef2ff}.matrix td{text-align:center;font-weight:600}
 .d0{background:#fee2e2;color:#991b1b}.d1{background:#fef3c7}.d2{background:#dbeafe}.d3{background:#dcfce7;color:#166534}
+.cl{border:1px solid #e2e8f0;border-radius:10px;padding:10px 14px;margin:12px 0;background:#fbfdff}
+.cl h3{color:#1e3a8a;margin-top:0}
+.cards{display:flex;flex-wrap:wrap;gap:10px}
+.card{flex:1 1 320px;border:1px solid #e2e8f0;border-left:4px solid #3b82f6;border-radius:8px;padding:8px 10px;background:#fff}
+.card.ours{border-left-color:#16a34a;background:#f0fdf4}
+.card .b{font-weight:700;font-size:13px}.card .ex{font-size:12px;color:#334155;margin-top:4px}
+.badge{display:inline-block;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;margin-left:4px}
+.bd0{background:#fee2e2;color:#991b1b}.bd1{background:#fef3c7;color:#92400e}.bd2{background:#dbeafe;color:#1e40af}.bd3{background:#dcfce7;color:#166534}
+.sim{font-size:12px;color:#475569;margin-top:6px}
 .p3{color:#b91c1c;font-weight:700}.p2{color:#b45309;font-weight:600}.p1{color:#1d4ed8}
-.chart{width:100%;max-width:560px;margin:6px 0}
-.chart .ctitle{font-size:13px;font-weight:700;fill:#1e3a8a}.chart .lbl{font-size:11px;fill:#334155}
-.chart .val{font-size:11px;fill:#475569}.chart .bar{fill:#3b82f6}
+.chart{width:100%;max-width:560px}.chart .ctitle{font-size:13px;font-weight:700;fill:#1e3a8a}.chart .lbl{font-size:11px;fill:#334155}.chart .val{font-size:11px;fill:#475569}.chart .bar{fill:#3b82f6}
 .charts{display:flex;flex-wrap:wrap;gap:24px}
-.controls{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0}
-.controls input,.controls select{padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px}
 .ol{font-size:13px;padding:1px 0}.lvl{display:inline-block;min-width:26px;font-size:10px;font-weight:700;color:#1e40af;font-family:monospace}
 .mono{font-family:monospace;font-size:11px;word-break:break-all}
 details{border:1px solid #e2e8f0;border-radius:8px;padding:8px 12px;margin:8px 0;background:#fbfdff}
-summary{cursor:pointer;font-weight:600;color:#1e3a8a} small{color:#64748b} code{background:#f1f5f9;padding:1px 5px;border-radius:4px}
-@media print{.controls{display:none} details{break-inside:avoid}}
+summary{cursor:pointer;font-weight:600;color:#1e3a8a}small{color:#64748b}code{background:#f1f5f9;padding:1px 5px;border-radius:4px}
+.controls input,.controls select{padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;margin-right:6px}
+@media print{details{break-inside:avoid}.cl{break-inside:avoid}}
 """
-FILTER_JS = """
-function f(){var q=(document.getElementById('q').value||'').toLowerCase();
-var t=document.getElementById('ft').value,p=document.getElementById('fp').value;
-document.querySelectorAll('#gaps tbody tr').forEach(function(r){
- var okq=r.innerText.toLowerCase().indexOf(q)>=0;
- var okt=!t||r.dataset.type===t; var okp=!p||r.dataset.prio===p;
- r.style.display=(okq&&okt&&okp)?'':'none';});}
-"""
+FILTER_JS = "function f(){var q=(document.getElementById('q').value||'').toLowerCase();var t=document.getElementById('ft').value,p=document.getElementById('fp').value;document.querySelectorAll('#gaps tbody tr').forEach(function(r){var okq=r.innerText.toLowerCase().indexOf(q)>=0;var okt=!t||r.dataset.type===t;var okp=!p||r.dataset.prio===p;r.style.display=(okq&&okt&&okp)?'':'none';});}"
+
+
+def outline_html(page):
+    rows = []
+    for h in page.get("heading_outline", [])[:140]:
+        lvl = int(h.get("level", 2) or 2)
+        rows.append(f'<div class="ol" style="margin-left:{(lvl-1)*18}px"><span class="lvl">H{lvl}</span> {esc(h.get("text"))}</div>')
+    hc = page.get("heading_counts", {})
+    cap = f'<small>H1:{hc.get("h1",0)} · H2:{hc.get("h2",0)} · H3:{hc.get("h3",0)} · H4+:{hc.get("h4_plus",0)} · words:{page.get("word_count_total",0)}</small>'
+    return cap + "".join(rows)
+
+
+def links_table(links, limit=60):
+    if not links:
+        return "<small>none captured</small>"
+    out = ["<table><thead><tr><th>Anchor</th><th>Target</th><th>Section</th><th>Scope</th></tr></thead><tbody>"]
+    for l in links[:limit]:
+        out.append(f'<tr><td>{esc(l.get("anchor"))}</td><td class="mono">{esc(l.get("href"))}</td><td>{esc(l.get("section"))}</td><td>{esc(l.get("scope",""))}</td></tr>')
+    out.append("</tbody></table>")
+    if len(links) > limit:
+        out.append(f"<small>… {len(links)-limit} more (see report.xlsx)</small>")
+    return "".join(out)
+
+
+def images_table(imgs, limit=40):
+    if not imgs:
+        return "<small>none captured</small>"
+    out = ["<table><thead><tr><th>Alt text</th><th>Src</th></tr></thead><tbody>"]
+    for im in imgs[:limit]:
+        alt = im.get("alt") or "<span style='color:#b91c1c'>(no alt)</span>"
+        out.append(f'<tr><td>{alt}</td><td class="mono">{esc(im.get("src"))}</td></tr>')
+    out.append("</tbody></table>")
+    return "".join(out)
 
 
 def build_html(run_dir, meta, clusters, gaps, pages, your, order):
+    pbb = page_by_brand(pages)
     k = gaps.get("kpis", {})
     serp = gaps.get("serp", {})
+    rank = gaps.get("ranking_assessment", {})
+    ext = gaps.get("external_brands", {})
     topic = esc(gaps.get("topic") or meta.get("topic") or "this page")
-    out = ["<!doctype html><html><head><meta charset='utf-8'>",
-           f"<title>Content-Gap Report — {topic}</title><style>{CSS}</style></head><body>"]
-    out.append(f"<h1>Content-Gap Report — {topic}</h1>")
-    out.append(f"<small>Your page: <code>{esc(gaps.get('your_url') or meta.get('your_url'))}</code> · "
-               f"page type: <b>{esc(gaps.get('page_type') or meta.get('page_type'))}</b> · "
-               f"pages compared: {len(order)}</small>")
+    o = ["<!doctype html><html><head><meta charset='utf-8'>",
+         f"<title>Content-Gap Report — {topic}</title><style>{CSS}</style></head><body>"]
+    o.append(f"<h1>Content-Gap Report — {topic}</h1>")
+    o.append(f"<small>Your page: <code>{esc(gaps.get('your_url') or meta.get('your_url'))}</code> · type: <b>{esc(gaps.get('page_type') or meta.get('page_type'))}</b> · pages compared: {len(order)}</small>")
+    o.append("<div class='toc'><b>Jump to:</b> <a href='#kpi'>Overview</a><a href='#matrix'>Cluster map</a>"
+             "<a href='#content'>What each wrote (side-by-side)</a><a href='#struct'>Headings</a>"
+             "<a href='#links'>Links</a><a href='#images'>Images</a><a href='#rank'>Ranking view</a>"
+             "<a href='#gaps'>Gaps</a></div>")
 
     yr = serp.get("your_rank")
-    if yr:
-        out.append(f"<div class='banner ok'>✅ Your page ranks <b>#{esc(yr)}</b> for \"{esc(serp.get('query'))}\".</div>")
-    else:
-        out.append("<div class='banner warn'>⚠️ Your page did <b>not</b> appear in the top search results for this topic.</div>")
+    o.append(f"<div class='banner ok'>✅ Your page ranks <b>#{esc(yr)}</b> for \"{esc(serp.get('query'))}\".</div>"
+             if yr else "<div class='banner warn'>⚠️ Your page did <b>not</b> appear in the top search results for this topic.</div>")
 
-    cards = [("coverage_pct", "Topic coverage", "%"), ("missing_count", "Missing sections", ""),
-             ("thin_count", "Thin sections", ""), ("faq_gap_count", "FAQ gaps", ""),
-             ("link_gap_count", "Internal-link gaps", ""), ("quality_score", "Quality score", "")]
-    out.append("<div class='kpis'>")
-    for key, label, unit in cards:
-        out.append(f"<div class='kpi'><div class='n'>{esc(k.get(key,0))}{unit}</div><div class='l'>{label}</div></div>")
-    out.append("</div>")
+    o.append("<h2 id='kpi'>Overview</h2><div class='kpis'>")
+    for key, label, u in [("coverage_pct", "Topic coverage", "%"), ("missing_count", "Missing", ""),
+                          ("thin_count", "Thin", ""), ("faq_gap_count", "FAQ gaps", ""),
+                          ("link_gap_count", "Link gaps", ""), ("quality_score", "Quality", "")]:
+        o.append(f"<div class='kpi'><div class='n'>{esc(k.get(key,0))}{u}</div><div class='l'>{label}</div></div>")
+    o.append("</div>")
+    o.append("<div class='charts'>")
+    o.append(svg_bar("Total words", [(p.get("brand", "?"), p.get("word_count_total", 0)) for p in pages]))
+    o.append(svg_bar("H2 headings", [(p.get("brand", "?"), (p.get("heading_counts", {}) or {}).get("h2", 0)) for p in pages]))
+    o.append(svg_bar("Internal links", [(p.get("brand", "?"), p.get("internal_link_count", 0)) for p in pages]))
+    o.append("</div>")
 
-    # cluster matrix
-    out.append("<h2>Cluster coverage — who wrote what</h2>")
-    out.append("<small>0 = absent · 1 = mention · 2 = standard · 3 = deep (example/table)</small>")
-    out.append("<table class='matrix'><thead><tr><th style='text-align:left'>Topic cluster</th>")
+    # cluster matrix (diagram)
+    o.append("<h2 id='matrix'>Cluster coverage map</h2><small>0 absent · 1 mention · 2 standard · 3 deep. Click a cluster to jump to the side-by-side content.</small>")
+    o.append("<table class='matrix'><thead><tr><th style='text-align:left'>Topic cluster</th>")
     for b in order:
-        out.append(f"<th>{esc(b)}</th>")
-    out.append("</tr></thead><tbody>")
-    for c in clusters.get("clusters", []):
-        out.append(f"<tr><td style='text-align:left'>{esc(c.get('name'))}</td>")
+        o.append(f"<th>{esc(b)}</th>")
+    o.append("</tr></thead><tbody>")
+    for i, c in enumerate(clusters.get("clusters", [])):
+        o.append(f"<tr><td style='text-align:left'><a href='#cl{i}'>{esc(c.get('name'))}</a></td>")
+        for b in order:
+            d = int((c.get("brands") or {}).get(b, {}).get("depth", 0) or 0)
+            o.append(f"<td class='d{d}'>{d}</td>")
+        o.append("</tr>")
+    o.append("</tbody></table>")
+
+    # side-by-side: what each wrote, with similarity + deep links
+    o.append("<h2 id='content'>What each page actually wrote — side by side</h2>")
+    o.append("<small>Each card shows the real text the page wrote for that topic, its depth, a deep-link that opens that exact section on the live page, and how similar the wording is across pages.</small>")
+    for i, c in enumerate(clusters.get("clusters", [])):
+        o.append(f"<div class='cl' id='cl{i}'><h3>{esc(c.get('name'))}</h3><div class='cards'>")
+        texts = {}
         for b in order:
             info = (c.get("brands") or {}).get(b, {})
+            page = pbb.get(b, {})
+            sec = best_section(page, c.get("name")) if info.get("present") else None
+            txt = (sec.get("text") if sec else (info.get("snippet") or "")) or ""
+            texts[b] = txt
             d = int(info.get("depth", 0) or 0)
-            out.append(f"<td class='d{d}' title='{esc(info.get('snippet',''))}'>{d}</td>")
-        out.append("</tr>")
-    out.append("</tbody></table>")
+            head = sec.get("heading") if sec else (info.get("section_heading") or "")
+            dl = textfrag(page.get("url"), head) if head else page.get("url", "#")
+            cls = "card ours" if b == your else "card"
+            present = info.get("present")
+            body = (esc(txt[:420]) + ("…" if len(txt) > 420 else "")) if present and txt else \
+                ("<i>not covered on this page</i>" if not present else "<i>(no text captured)</i>")
+            link = f" · <a href='{esc(dl)}' target='_blank'>open section ↗</a>" if head else ""
+            o.append(f"<div class='{cls}'><div class='b'>{esc(b)}<span class='badge bd{d}'>depth {d}</span></div>"
+                     f"<div class='ex'><b>{esc(head)}</b>{link}<br>{body}</div></div>")
+        o.append("</div>")
+        # similarity line
+        present_brands = [b for b in order if texts.get(b)]
+        sims = []
+        for a in range(len(present_brands)):
+            for bb in range(a + 1, len(present_brands)):
+                pa, pbn = present_brands[a], present_brands[bb]
+                pct = similarity(texts[pa], texts[pbn])
+                sims.append(f"{esc(pa)}↔{esc(pbn)}: <b>{pct}%</b> ({sim_verdict(pct)})")
+        if sims:
+            avg = round(sum(int(s.split('<b>')[1].split('%')[0]) for s in sims) / len(sims))
+            o.append(f"<div class='sim'><b>Content similarity:</b> {' · '.join(sims)} — "
+                     f"overall ~{avg}% ({sim_verdict(avg)} wording across pages)</div>")
+        o.append("</div>")
 
-    # charts
-    out.append("<h2>How the pages compare</h2><div class='charts'>")
-    out.append(svg_bar("Total word count", [(p.get("brand", "?"), p.get("word_count_total", 0)) for p in pages]))
-    out.append(svg_bar("H2 headings", [(p.get("brand", "?"), (p.get("heading_counts", {}) or {}).get("h2", 0)) for p in pages]))
-    out.append(svg_bar("FAQs answered", [(p.get("brand", "?"), len(p.get("faqs", []))) for p in pages]))
-    out.append(svg_bar("Internal links", [(p.get("brand", "?"), p.get("internal_link_count", len(p.get("internal_links", [])))) for p in pages]))
-    out.append("</div>")
-
-    # page structure (H1/H2/H3 outline per page) — Content Writer v2 style
-    out.append("<h2>Page structure — H1 / H2 / H3 outline per page</h2>")
+    # headings (separate H1/H2/H3 per page)
+    o.append("<h2 id='struct'>Header tags — H1 / H2 / H3 per page</h2>")
     for p in pages:
         opn = " open" if p.get("is_ours") else ""
-        out.append(f"<details{opn}><summary>{esc(p.get('brand'))}{' — OUR PAGE' if p.get('is_ours') else ''}</summary>{outline_html(p)}</details>")
+        o.append(f"<details{opn}><summary>{esc(p.get('brand'))}{' — OUR PAGE' if p.get('is_ours') else ''}</summary>{outline_html(p)}</details>")
 
-    # internal linking (real links per page)
-    out.append("<h2>Internal linking — real links per page</h2>")
-    out.append("<small>Parsed directly from each page's HTML (anchor → target), so counts are exact.</small>")
+    # links
+    o.append("<h2 id='links'>Internal &amp; external links per page</h2><small>Parsed from raw HTML — counts are exact.</small>")
     for p in pages:
-        opn = " open" if p.get("is_ours") else ""
-        out.append(f"<details{opn}><summary>{esc(p.get('brand'))} — {p.get('internal_link_count', len(p.get('internal_links', [])))} internal links</summary>{links_html(p)}</details>")
+        o.append(f"<details><summary>{esc(p.get('brand'))} — {p.get('internal_link_count',0)} internal · {p.get('external_link_count',0)} external</summary>"
+                 f"<h3>Internal</h3>{links_table(p.get('internal_links', []))}<h3>External</h3>{links_table(p.get('external_links', []))}</details>")
 
-    # gaps table
-    out.append("<h2>Prioritised gaps</h2>")
-    out.append("<div class='controls'><input id='q' onkeyup='f()' placeholder='search gaps…'>"
-               "<select id='ft' onchange='f()'><option value=''>all types</option>"
-               "<option>missing</option><option>thin</option><option>unique</option><option>faq</option>"
-               "<option>link</option><option>example</option><option>quality</option></select>"
-               "<select id='fp' onchange='f()'><option value=''>all priorities</option>"
-               "<option value='3'>P3</option><option value='2'>P2</option><option value='1'>P1</option></select></div>")
-    out.append("<table id='gaps'><thead><tr><th>P</th><th>Type</th><th>Cluster</th><th>What to do</th><th>Exemplar</th></tr></thead><tbody>")
+    # images
+    o.append("<h2 id='images'>Images per page</h2>")
+    for p in pages:
+        o.append(f"<details><summary>{esc(p.get('brand'))} — {p.get('image_count',0)} images ({p.get('image_alt_count',0)} with alt)</summary>{images_table(p.get('images', []))}</details>")
+
+    # ranking + external brands
+    if rank or ext:
+        o.append("<h2 id='rank'>Ranking view &amp; external mentions</h2>")
+        if rank:
+            o.append("<table><thead><tr><th>Page</th><th>Google search view</th><th>AI search / answer-engine view</th></tr></thead><tbody>")
+            for b in order:
+                r = rank.get(b, {})
+                o.append(f"<tr><td>{esc(b)}</td><td>{esc(r.get('google'))}</td><td>{esc(r.get('ai_search'))}</td></tr>")
+            o.append("</tbody></table>")
+        if ext:
+            o.append("<h3>External brands / third parties mentioned on each page</h3><ul>")
+            for b in order:
+                names = ext.get(b) or []
+                o.append(f"<li><b>{esc(b)}</b>: {esc(', '.join(names)) if names else 'none detected'}</li>")
+            o.append("</ul>")
+
+    # gaps
+    o.append("<h2 id='gaps'>Prioritised gaps — what to write</h2>")
+    o.append("<div class='controls'><input id='q' onkeyup='f()' placeholder='search…'>"
+             "<select id='ft' onchange='f()'><option value=''>all types</option><option>missing</option><option>thin</option><option>unique</option><option>faq</option><option>link</option><option>example</option><option>quality</option></select>"
+             "<select id='fp' onchange='f()'><option value=''>all priorities</option><option value='3'>P3</option><option value='2'>P2</option><option value='1'>P1</option></select></div>")
+    o.append("<table id='gaps'><thead><tr><th>P</th><th>Type</th><th>Cluster</th><th>What to do</th><th>Exemplar</th></tr></thead><tbody>")
     for g in sorted(gaps.get("gaps", []), key=lambda x: -int(x.get("priority", 0) or 0)):
         pr = int(g.get("priority", 0) or 0)
-        out.append(f"<tr data-type='{esc(g.get('type'))}' data-prio='{pr}'>"
-                   f"<td class='p{pr}'>P{pr}</td><td>{esc(g.get('type'))}</td><td>{esc(g.get('cluster'))}</td>"
-                   f"<td><b>{esc(g.get('title'))}</b><br><small>{esc(g.get('recommendation') or g.get('detail'))}</small></td>"
-                   f"<td>{esc(g.get('exemplar_brand'))}</td></tr>")
-    out.append("</tbody></table>")
+        o.append(f"<tr data-type='{esc(g.get('type'))}' data-prio='{pr}'><td class='p{pr}'>P{pr}</td><td>{esc(g.get('type'))}</td><td>{esc(g.get('cluster'))}</td>"
+                 f"<td><b>{esc(g.get('title'))}</b><br><small>{esc(g.get('recommendation') or g.get('detail'))}</small></td><td>{esc(g.get('exemplar_brand'))}</td></tr>")
+    o.append("</tbody></table>")
 
-    fg = gaps.get("faq_gaps", [])
-    if fg:
-        out.append("<h2>FAQ gaps (questions competitors answer, you don't)</h2><ul>")
-        for q in fg:
-            out.append(f"<li>{esc(q.get('question'))} <small>— answered by {esc(', '.join(q.get('answered_by', [])))}</small></li>")
-        out.append("</ul>")
-    lg = gaps.get("link_gaps", [])
-    if lg:
-        out.append("<h2>Internal-link gaps (targets competitors link, you don't)</h2><ul>")
-        for l in lg:
-            out.append(f"<li>{esc(l.get('topic_or_target'))} <small>— linked by {esc(', '.join(l.get('present_in', [])))}</small></li>")
-        out.append("</ul>")
-
-    q = (gaps.get("quality") or {}).get("per_brand", {})
-    if q:
-        out.append("<h2>Content-quality signals</h2><table><thead><tr><th>Page</th><th>Words</th><th>H2s</th>"
-                   "<th>FAQs</th><th>Int. links</th><th>Schema</th><th>E-E-A-T</th><th>Freshness</th></tr></thead><tbody>")
-        for b in order:
-            r = q.get(b, {})
-            out.append(f"<tr><td>{esc(b)}</td><td>{esc(r.get('word_count'))}</td><td>{esc(r.get('h2'))}</td>"
-                       f"<td>{esc(r.get('faqs'))}</td><td>{esc(r.get('internal_links'))}</td>"
-                       f"<td>{esc(', '.join(r.get('schema', []) or []))}</td>"
-                       f"<td>{'yes' if r.get('eeat') else 'no'}</td><td>{esc(r.get('freshness'))}</td></tr>")
-        out.append("</tbody></table>")
-
-    out.append("<hr><small>Generated by the SEO Content-Gap Analyzer. Identifies gaps and briefs — "
-               "it does not contain publishable copy. Internal links and headings are parsed from the "
-               "live HTML; verify any figure before publishing.</small>")
-    out.append(f"<script>{FILTER_JS}</script></body></html>")
+    o.append("<hr><small>SEO Content-Gap Analyzer — identifies gaps & shows real competitor content for reference. Not publishable copy. Links/headings/images parsed from live HTML; verify before publishing.</small>")
+    o.append(f"<script>{FILTER_JS}</script></body></html>")
     path = os.path.join(run_dir, "report.html")
     with open(path, "w", encoding="utf-8") as fh:
-        fh.write("\n".join(out))
+        fh.write("\n".join(o))
     return path
 
 
@@ -267,99 +333,133 @@ def build_html(run_dir, meta, clusters, gaps, pages, your, order):
 def build_xlsx(run_dir, meta, clusters, gaps, pages, your, order):
     try:
         from openpyxl import Workbook
-        from openpyxl.chart import BarChart, Reference
-        from openpyxl.styles import Font, PatternFill
+        from openpyxl.styles import Alignment, Font, PatternFill
     except Exception:
-        with open(os.path.join(run_dir, "internal_links.csv"), "w", newline="", encoding="utf-8") as fh:
-            w = csv.writer(fh); w.writerow(["brand", "anchor", "target", "section", "scope"])
+        with open(os.path.join(run_dir, "full_content.csv"), "w", newline="", encoding="utf-8") as fh:
+            w = csv.writer(fh); w.writerow(["page", "level", "heading", "words", "text"])
             for p in pages:
-                for l in p.get("internal_links", []):
-                    w.writerow([p.get("brand"), l.get("anchor"), l.get("href"), l.get("section"), l.get("scope")])
-        with open(os.path.join(run_dir, "gaps.csv"), "w", newline="", encoding="utf-8") as fh:
-            w = csv.writer(fh); w.writerow(["priority", "type", "cluster", "title", "recommendation", "exemplar"])
-            for g in gaps.get("gaps", []):
-                w.writerow([g.get("priority"), g.get("type"), g.get("cluster"), g.get("title"),
-                            g.get("recommendation") or g.get("detail"), g.get("exemplar_brand")])
-        return None, "openpyxl not installed — wrote gaps.csv + internal_links.csv (pip install openpyxl for the XLSX)."
+                for s in p.get("sections", []):
+                    w.writerow([p.get("brand"), "H" + str(s.get("level", "")), s.get("heading"), s.get("word_count"), s.get("text")])
+        return None, "openpyxl not installed — wrote full_content.csv (pip install openpyxl for the full workbook)."
 
+    pbb = page_by_brand(pages)
     wb = Workbook()
     head, fill = Font(bold=True, color="FFFFFF"), PatternFill("solid", fgColor="1E3A8A")
+    wrap = Alignment(wrap_text=True, vertical="top")
 
-    def hdr(ws, cols):
+    def sheet(name, cols):
+        ws = wb.create_sheet(name)
         ws.append(cols)
         for c in ws[1]:
             c.font = head; c.fill = fill
+        ws.freeze_panes = "A2"
+        return ws
 
     # Overview
     ws = wb.active; ws.title = "Overview"
+    ws.append(["KPI", "Value"])
+    for c in ws[1]:
+        c.font = head; c.fill = fill
     k = gaps.get("kpis", {})
-    hdr(ws, ["KPI", "Value"])
-    for label, key in [("Topic coverage %", "coverage_pct"), ("Missing sections", "missing_count"),
-                       ("Thin sections", "thin_count"), ("Unique sections", "unique_count"),
+    for label, key in [("Topic coverage %", "coverage_pct"), ("Missing", "missing_count"), ("Thin", "thin_count"),
                        ("FAQ gaps", "faq_gap_count"), ("Internal-link gaps", "link_gap_count"),
-                       ("Example gaps", "example_gap_count"), ("Quality score", "quality_score"),
-                       ("Your word count", "your_word_count"), ("Competitor median words", "competitor_median_word_count")]:
+                       ("Quality score", "quality_score"), ("Your words", "your_word_count"),
+                       ("Competitor median words", "competitor_median_word_count")]:
         ws.append([label, k.get(key, 0)])
-    ws.append([]); ws.append(["Page", "Words", "H2s", "Internal links"])
-    start = ws.max_row
-    for p in pages:
-        ws.append([p.get("brand", "?"), p.get("word_count_total", 0),
-                   (p.get("heading_counts", {}) or {}).get("h2", 0),
-                   p.get("internal_link_count", len(p.get("internal_links", [])))])
-    chart = BarChart(); chart.title = "Word count by page"; chart.type = "bar"
-    chart.add_data(Reference(ws, min_col=2, min_row=start, max_row=ws.max_row), titles_from_data=True)
-    chart.set_categories(Reference(ws, min_col=1, min_row=start + 1, max_row=ws.max_row))
-    ws.add_chart(chart, "F2")
 
-    # Cluster matrix
-    ws = wb.create_sheet("Cluster Matrix")
-    hdr(ws, ["Cluster"] + order)
+    ws = sheet("Cluster Matrix", ["Cluster"] + order)
     for c in clusters.get("clusters", []):
         ws.append([c.get("name")] + [int((c.get("brands") or {}).get(b, {}).get("depth", 0) or 0) for b in order])
     ws.auto_filter.ref = ws.dimensions
 
-    # Page Structure (H1/H2/H3 outline per page) — CW v2 style
-    ws = wb.create_sheet("Page Structure")
-    hdr(ws, ["Page", "Level", "Heading"])
+    # Full Content — every section, every page
+    ws = sheet("Full Content", ["Page", "Level", "Heading", "Words", "Text"])
     for p in pages:
-        for h in p.get("heading_outline", []):
-            ws.append([p.get("brand"), "H" + str(h.get("level", "")), h.get("text")])
+        for s in p.get("sections", []):
+            ws.append([p.get("brand"), "H" + str(s.get("level", "")), s.get("heading"), s.get("word_count"), s.get("text")])
+    ws.column_dimensions["E"].width = 90
+    for row in ws.iter_rows(min_row=2, min_col=5, max_col=5):
+        row[0].alignment = wrap
     ws.auto_filter.ref = ws.dimensions
 
-    # Internal Links (the real, parsed links)
-    ws = wb.create_sheet("Internal Links")
-    hdr(ws, ["Page", "Anchor", "Target", "Section", "Scope"])
+    # Section Comparison — per cluster, each brand's text + similarity to ours
+    ws = sheet("Section Comparison", ["Cluster", "Page", "Depth", "Section heading", "Words", "Similarity to OUR %", "Text"])
+    for c in clusters.get("clusters", []):
+        our_sec = best_section(pbb.get(your, {}), c.get("name"))
+        our_txt = our_sec.get("text") if our_sec else ""
+        for b in order:
+            info = (c.get("brands") or {}).get(b, {})
+            if not info.get("present"):
+                continue
+            sec = best_section(pbb.get(b, {}), c.get("name"))
+            txt = sec.get("text") if sec else (info.get("snippet") or "")
+            simp = "" if b == your else similarity(our_txt, txt)
+            ws.append([c.get("name"), b, int(info.get("depth", 0) or 0),
+                       sec.get("heading") if sec else "", sec.get("word_count") if sec else "", simp, txt])
+    ws.column_dimensions["G"].width = 90
+    for row in ws.iter_rows(min_row=2, min_col=7, max_col=7):
+        row[0].alignment = wrap
+    ws.auto_filter.ref = ws.dimensions
+
+    # Header tag lists — separate H1 / H2 / H3
+    for lvl, nm in [(1, "H1 Tags"), (2, "H2 Tags"), (3, "H3 Tags")]:
+        ws = sheet(nm, ["Page", "Heading"])
+        for p in pages:
+            for h in p.get("heading_outline", []):
+                if int(h.get("level", 0) or 0) == lvl:
+                    ws.append([p.get("brand"), h.get("text")])
+        ws.auto_filter.ref = ws.dimensions
+
+    ws = sheet("Internal Links", ["Page", "Anchor", "Target", "Section", "Scope"])
     for p in pages:
         for l in p.get("internal_links", []):
             ws.append([p.get("brand"), l.get("anchor"), l.get("href"), l.get("section"), l.get("scope")])
     ws.auto_filter.ref = ws.dimensions
 
-    # Gaps
-    ws = wb.create_sheet("Gaps")
-    hdr(ws, ["Priority", "Type", "Cluster", "Title", "Recommendation", "Exemplar"])
-    pr_fill = {3: PatternFill("solid", fgColor="FECACA"), 2: PatternFill("solid", fgColor="FEF3C7"),
-               1: PatternFill("solid", fgColor="DBEAFE")}
+    ws = sheet("External Links", ["Page", "Anchor", "Target", "Section"])
+    for p in pages:
+        for l in p.get("external_links", []):
+            ws.append([p.get("brand"), l.get("anchor"), l.get("href"), l.get("section")])
+    ws.auto_filter.ref = ws.dimensions
+
+    ws = sheet("Images", ["Page", "Alt text", "Src"])
+    for p in pages:
+        for im in p.get("images", []):
+            ws.append([p.get("brand"), im.get("alt"), im.get("src")])
+    ws.auto_filter.ref = ws.dimensions
+
+    # Ranking + External brands (LLM-provided, optional)
+    rank = gaps.get("ranking_assessment", {})
+    if rank:
+        ws = sheet("Ranking View", ["Page", "Google search view", "AI search view"])
+        for b in order:
+            r = rank.get(b, {})
+            ws.append([b, r.get("google"), r.get("ai_search")])
+        ws.auto_filter.ref = ws.dimensions
+    ext = gaps.get("external_brands", {})
+    if ext:
+        ws = sheet("External Brands", ["Page", "Brands / third parties mentioned"])
+        for b in order:
+            ws.append([b, ", ".join(ext.get(b) or [])])
+        ws.auto_filter.ref = ws.dimensions
+
+    # Gaps / FAQ / Quality
+    ws = sheet("Gaps", ["Priority", "Type", "Cluster", "Title", "Recommendation", "Exemplar"])
+    prf = {3: PatternFill("solid", fgColor="FECACA"), 2: PatternFill("solid", fgColor="FEF3C7"), 1: PatternFill("solid", fgColor="DBEAFE")}
     for g in sorted(gaps.get("gaps", []), key=lambda x: -int(x.get("priority", 0) or 0)):
         ws.append([g.get("priority"), g.get("type"), g.get("cluster"), g.get("title"),
                    g.get("recommendation") or g.get("detail"), g.get("exemplar_brand")])
-        f = pr_fill.get(int(g.get("priority", 0) or 0))
+        f = prf.get(int(g.get("priority", 0) or 0))
         if f:
             ws.cell(row=ws.max_row, column=1).fill = f
     ws.auto_filter.ref = ws.dimensions
 
-    # FAQ gaps / Link gaps / Quality
-    ws = wb.create_sheet("FAQ Gaps"); hdr(ws, ["Question", "Answered by"])
+    ws = sheet("FAQ Gaps", ["Question", "Answered by"])
     for q in gaps.get("faq_gaps", []):
         ws.append([q.get("question"), ", ".join(q.get("answered_by", []))])
     ws.auto_filter.ref = ws.dimensions
 
-    ws = wb.create_sheet("Link Gaps"); hdr(ws, ["Topic / target", "Linked by"])
-    for l in gaps.get("link_gaps", []):
-        ws.append([l.get("topic_or_target"), ", ".join(l.get("present_in", []))])
-    ws.auto_filter.ref = ws.dimensions
-
-    ws = wb.create_sheet("Quality")
-    hdr(ws, ["Page", "Words", "H2s", "FAQs", "Internal links", "Schema", "E-E-A-T", "Freshness"])
+    ws = sheet("Quality", ["Page", "Words", "H2s", "FAQs", "Internal links", "Schema", "E-E-A-T", "Freshness"])
     q = (gaps.get("quality") or {}).get("per_brand", {})
     for b in order:
         r = q.get(b, {})
@@ -372,7 +472,6 @@ def build_xlsx(run_dir, meta, clusters, gaps, pages, your, order):
     return path, None
 
 
-# ----------------------------- main ------------------------------------------
 def main():
     if len(sys.argv) < 2:
         print("usage: python build_report.py <run_dir>"); sys.exit(1)
@@ -387,7 +486,7 @@ def main():
         print("XLSX  ->", xlsx_path)
     if note:
         print("NOTE :", note)
-    print("Open report.html in a browser and Print -> Save as PDF for a shareable PDF.")
+    print("Open report.html in a browser (Print -> Save as PDF to share).")
 
 
 if __name__ == "__main__":

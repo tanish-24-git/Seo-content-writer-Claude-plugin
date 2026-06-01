@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
-"""Deterministic page structure + link extractor (Python standard library only).
+"""Deterministic page extractor (Python standard library only).
 
 Parses the RAW HTML of a page and extracts — accurately, not approximated —
-the title, meta description, the full H1..H6 outline, EVERY hyperlink (anchor
-text + href, classified internal/external, with its section + scope), tables,
-JSON-LD schema types, images/alt, and a visible word count.
+everything a content team needs to SEE what was written:
+  * title, meta description, H1
+  * the full H1..H6 outline AND the actual body text under each heading (sections)
+  * EVERY hyperlink (anchor + href, internal/external, section + scope)
+  * EVERY image (src + alt)
+  * tables count, JSON-LD schema types, word count
 
-This solves the "internal linking looks fake" problem: links come straight from
-the HTML `<a href>` tags, not from a summarised markdown view.
+This is the source of truth for structure, links, images and verbatim section
+text. The page-extractor agent layers semantic notes (FAQ Q&A, examples,
+external-brand mentions, ranking view) on top via WebFetch.
 
 Usage:  python extract_page.py <url> <out_json>
-        (the page-extractor agent runs this first, then layers semantic
-         summaries/FAQs from WebFetch on top.)
-
-If the fetch is blocked (e.g. HTTP 403), it writes a JSON with
-extraction_status="blocked" so the agent can fall back to WebFetch / manual paste.
 """
 import json
 import re
@@ -30,10 +29,13 @@ HEADERS = {"User-Agent": UA, "Accept-Language": "en-IN,en;q=0.9",
 SKIP = {"script", "style", "noscript", "svg", "template"}
 HEADINGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
 CHROME = {"nav", "footer", "header", "aside"}
+SEC_CAP = 6000  # max chars of body text kept per section
 
 
 def reg_domain(host):
-    host = (host or "").lower().lstrip("www.")
+    host = (host or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
     parts = host.split(".")
     return ".".join(parts[-2:]) if len(parts) >= 2 else host
 
@@ -46,18 +48,17 @@ class PageParser(HTMLParser):
         self.title = ""
         self.meta_desc = ""
         self.h1 = ""
-        self.outline = []          # [{level, text}]
+        self.outline = []
         self.heading_counts = {"h1": 0, "h2": 0, "h3": 0, "h4_plus": 0}
-        self.links = []            # [{anchor, href, section, scope, internal}]
-        self.images = 0
-        self.images_alt = 0
+        self.links = []
+        self.images_list = []
         self.tables = 0
         self.schema_types = []
         self.words = 0
+        self.sections = []                 # [{level, heading, text}]
         # state
         self._skip = 0
         self._chrome = {k: 0 for k in CHROME}
-        self._cur_section = ""
         self._h_level = 0
         self._h_buf = []
         self._in_title = False
@@ -65,12 +66,28 @@ class PageParser(HTMLParser):
         self._a_buf = []
         self._ldjson = 0
         self._ld_buf = []
+        self._sec_level = 0
+        self._sec_heading = "(intro)"
+        self._sec_buf = []
 
     def _scope(self):
         for k in ("nav", "footer", "header", "aside"):
             if self._chrome[k] > 0:
                 return "sidebar" if k == "aside" else k
         return "in-content"
+
+    def _flush_section(self):
+        text = re.sub(r"[ \t]+", " ", " ".join(self._sec_buf))
+        text = re.sub(r"\s*\n\s*", " ", text).strip()
+        if text:
+            self.sections.append({
+                "level": self._sec_level,
+                "heading": self._sec_heading,
+                "text": text[:SEC_CAP],
+                "word_count": len(text.split()),
+                "truncated": len(text) > SEC_CAP,
+            })
+        self._sec_buf = []
 
     def handle_starttag(self, tag, attrs):
         a = dict(attrs)
@@ -93,9 +110,10 @@ class PageParser(HTMLParser):
             self._a_href = a.get("href")
             self._a_buf = []
         elif tag == "img":
-            self.images += 1
-            if (a.get("alt") or "").strip():
-                self.images_alt += 1
+            src = a.get("src") or a.get("data-src") or ""
+            if src and len(self.images_list) < 120:
+                self.images_list.append({"src": urljoin(self.base, src),
+                                         "alt": (a.get("alt") or "").strip()})
         elif tag == "table":
             self.tables += 1
 
@@ -126,20 +144,19 @@ class PageParser(HTMLParser):
                     self.heading_counts["h3"] += 1
                 else:
                     self.heading_counts["h4_plus"] += 1
-                self._cur_section = text
+                # close previous section, open a new one for this heading
+                self._flush_section()
+                self._sec_level = lvl
+                self._sec_heading = text
             self._h_level = 0
         elif tag == "a" and self._a_href is not None:
             anchor = re.sub(r"\s+", " ", "".join(self._a_buf)).strip()
-            href = self._a_href
-            absu = urljoin(self.base, href)
-            scheme = urlparse(absu).scheme
-            if anchor and scheme in ("http", "https"):
+            absu = urljoin(self.base, self._a_href)
+            if anchor and urlparse(absu).scheme in ("http", "https"):
                 internal = reg_domain(urlparse(absu).netloc) == self.base_dom
-                self.links.append({
-                    "anchor": anchor[:160], "href": absu,
-                    "section": self._cur_section[:120], "scope": self._scope(),
-                    "internal": internal,
-                })
+                self.links.append({"anchor": anchor[:160], "href": absu,
+                                   "section": self._sec_heading[:120],
+                                   "scope": self._scope(), "internal": internal})
             self._a_href = None
 
     def handle_data(self, data):
@@ -152,8 +169,12 @@ class PageParser(HTMLParser):
             self.title = re.sub(r"\s+", " ", data).strip()
         if self._h_level:
             self._h_buf.append(data)
+            return
         if self._a_href is not None:
             self._a_buf.append(data)
+        # body text of the current section (in-content only, skip nav/footer)
+        if self._scope() == "in-content":
+            self._sec_buf.append(data)
         self.words += len(data.split())
 
     def _parse_ldjson(self, raw):
@@ -172,10 +193,8 @@ class PageParser(HTMLParser):
 def fetch(url):
     if "://" not in url:
         url = "https://" + url
-    req = Request(url, headers=HEADERS)
-    with urlopen(req, timeout=30) as r:
-        raw = r.read()
-        return r.geturl(), raw.decode("utf-8", "ignore")
+    with urlopen(Request(url, headers=HEADERS), timeout=30) as r:
+        return r.geturl(), r.read().decode("utf-8", "ignore")
 
 
 def main():
@@ -191,23 +210,22 @@ def main():
         print("BLOCKED:", exc); return
     p = PageParser(final_url)
     p.feed(html)
+    p._flush_section()
     internal = [l for l in p.links if l["internal"]]
-    uniq_targets = sorted({l["href"] for l in internal})
+    external = [l for l in p.links if not l["internal"]]
     data = {
-        "url": final_url,
-        "title": p.title,
-        "meta_description": p.meta_desc,
-        "h1": p.h1,
-        "heading_counts": p.heading_counts,
-        "heading_outline": p.outline[:200],
+        "url": final_url, "title": p.title, "meta_description": p.meta_desc, "h1": p.h1,
+        "heading_counts": p.heading_counts, "heading_outline": p.outline[:250],
+        "sections": p.sections[:120],
         "internal_link_count": len(internal),
-        "unique_internal_targets": len(uniq_targets),
-        "external_link_count": len(p.links) - len(internal),
-        "internal_links": internal[:400],
-        "external_links_sample": [l for l in p.links if not l["internal"]][:60],
-        "tables": p.tables,
-        "image_count": p.images,
-        "image_alt_count": p.images_alt,
+        "unique_internal_targets": len({l["href"] for l in internal}),
+        "external_link_count": len(external),
+        "internal_links": internal[:500],
+        "external_links": external[:120],
+        "images": p.images_list,
+        "image_count": len(p.images_list),
+        "image_alt_count": sum(1 for i in p.images_list if i["alt"]),
+        "tables_count": p.tables,
         "schema_types": p.schema_types,
         "word_count_total": p.words,
         "extraction_status": "full",
@@ -215,7 +233,8 @@ def main():
     }
     json.dump(data, open(out, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
     print(f"OK {final_url} :: H1={p.heading_counts['h1']} H2={p.heading_counts['h2']} "
-          f"internal_links={len(internal)} (unique {len(uniq_targets)}) words={p.words}")
+          f"sections={len(p.sections)} links={len(internal)}int/{len(external)}ext "
+          f"images={len(p.images_list)} words={p.words}")
 
 
 if __name__ == "__main__":
