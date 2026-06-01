@@ -1,5 +1,5 @@
 {
-  "$comment": "The canonical per-page extraction schema. page-extractor writes one file like this per page. Keep field names stable — build_report.py and gap-analyst depend on them.",
+  "$comment": "Per-page extraction schema. The STRUCTURAL fields (title, meta, h1, heading_counts, heading_outline, internal_links, unique_internal_targets, external_link_count, tables_count, schema_types, word_count_total, image_count) are produced ACCURATELY by scripts/extract_page.py parsing the raw HTML. The SEMANTIC fields (sections[].summary, faqs, examples, features_or_riders, numbers, author/reviewer/dates, readability_note) are layered on by the page-extractor agent via WebFetch. Keep field names stable — build_report.py and gap-analyst depend on them.",
   "url": "",
   "brand": "",
   "is_ours": false,
@@ -7,7 +7,8 @@
   "title": "",
   "meta_description": "",
   "h1": "",
-  "outline": [{ "level": 2, "text": "" }],
+  "heading_counts": { "h1": 0, "h2": 0, "h3": 0, "h4_plus": 0 },
+  "heading_outline": [{ "level": 2, "text": "" }],
   "sections": [
     {
       "heading": "",
@@ -21,8 +22,13 @@
   ],
   "faqs": [{ "question": "", "answer": "" }],
   "examples": [{ "context": "", "figures": "" }],
-  "tables": [{ "title": "", "rows": 0, "cols": 0, "note": "" }],
-  "internal_links": [{ "anchor": "", "target": "", "kind": "plan|guide|calculator|claim|other" }],
+  "tables_count": 0,
+  "internal_link_count": 0,
+  "unique_internal_targets": 0,
+  "external_link_count": 0,
+  "internal_links": [
+    { "anchor": "", "href": "", "section": "", "scope": "in-content|nav|footer|sidebar" }
+  ],
   "features_or_riders": [""],
   "numbers": [""],
   "schema_types": [""],
@@ -30,6 +36,8 @@
   "reviewer": "",
   "published_date": "",
   "modified_date": "",
+  "image_count": 0,
+  "image_alt_count": 0,
   "word_count_total": 0,
   "readability_note": "",
   "extraction_status": "full|fallback_requests|manual_paste|blocked",

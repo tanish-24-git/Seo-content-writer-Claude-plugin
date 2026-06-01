@@ -12,8 +12,10 @@ Install Claude Code and log in, then in a Claude session:
 this, you still get the HTML report and CSV files.
 
 ## 2. Run an analysis
-Open a terminal in any folder where you keep content work, then:
+Open a terminal in a **neutral folder** (a fresh content-work folder — *not* inside another
+company's codebase, so no outside context leaks in), then:
 ```
+mkdir seo-gap-work && cd seo-gap-work
 claude
 > /seo-gap https://www.example.com/your-page
 ```

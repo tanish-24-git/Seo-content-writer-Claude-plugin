@@ -29,7 +29,9 @@ Classify each finding as one of:
   competitor median → EXPAND.
 - **unique** — only OUR page covers it → KEEP/PROMOTE.
 - **faq** — a question competitors answer that OUR FAQ does not.
-- **link** — an internal-link target/topic competitors link that OUR page does not.
+- **link** — an internal-link target/topic competitors link that OUR page does not. Use the
+  **accurate `internal_links`** list (parsed from HTML by extract_page.py); prefer in-content
+  links over nav/footer, and compare unique-target counts, not just totals.
 - **example** — competitors use a worked example/number/table where OUR page uses prose only.
 - **quality** — OUR page trails on a quality signal (word count, schema, author/reviewer
   E-E-A-T, freshness, readability).
@@ -59,7 +61,7 @@ our vs competitor-median word count, and a per-brand quality row.
              "priority": 3, "title": "", "detail": "", "exemplar_brand": "", "recommendation": ""}],
   "faq_gaps": [{"question": "", "answered_by": [""]}],
   "link_gaps": [{"topic_or_target": "", "present_in": [""]}],
-  "quality": {"per_brand": {"OUR PAGE": {"word_count": 0, "sections": 0, "faqs": 0,
+  "quality": {"per_brand": {"OUR PAGE": {"word_count": 0, "h2": 0, "faqs": 0,
                "internal_links": 0, "schema": [""], "eeat": false, "freshness": ""}}}
 }
 ```
