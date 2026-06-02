@@ -1,6 +1,6 @@
 {
   "name": "seo-content-gap",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Single-page competitor content-gap analyzer: crawl your page + competitor pages (or auto-discover via search), check ranking, align block-to-block and FAQ-to-FAQ, cluster topics, and produce a visual gap report (HTML/PDF + XLSX) plus a conversational session. Identifies what each competitor wrote, how they differ, content quality, guideline adherence, and internal-linking gaps — it does not generate the final copy.",
   "author": {
     "name": "tanish-24-git"

@@ -23,6 +23,7 @@ import difflib
 import html
 import json
 import os
+import re
 import sys
 from urllib.parse import quote
 
@@ -63,6 +64,79 @@ def esc(x):
 
 def page_by_brand(pages):
     return {p.get("brand"): p for p in pages}
+
+
+# --------------------- resilient brand-key resolution -----------------------
+# clusters.json / gaps.json are written by the gap-analyst agent and SHOULD key
+# every brand map under the exact canonical brand string from meta.json. If the
+# agent drifts (short form, "OUR PAGE", the URL), an exact lookup silently zeroes
+# the column. Resolve case/whitespace-insensitively, and never fail silently.
+def _norm(s):
+    return re.sub(r"\s+", " ", str(s if s is not None else "").strip().lower())
+
+
+def resolve_brand_key(brand_map, canonical):
+    """Return the key in brand_map matching `canonical` — exact first, then
+    case/whitespace-insensitive. None if nothing matches."""
+    if not isinstance(brand_map, dict) or not brand_map:
+        return None
+    if canonical in brand_map:
+        return canonical
+    target = _norm(canonical)
+    for k in brand_map:
+        if _norm(k) == target:
+            return k
+    return None
+
+
+def map_get(brand_map, canonical, default=None):
+    """brand_map value for the canonical brand via resilient resolution."""
+    key = resolve_brand_key(brand_map or {}, canonical)
+    return (brand_map or {}).get(key, default) if key is not None else default
+
+
+def brand_entry(brand_map, canonical):
+    """The dict entry for a canonical brand, or {} — for cluster brand maps."""
+    return map_get(brand_map, canonical, {}) or {}
+
+
+def check_brand_keys(clusters, order):
+    """Loud per-cluster warnings: a canonical brand that resolves to NO key in a
+    cluster that DOES carry brand data — that column would render empty."""
+    warnings = []
+    for c in clusters.get("clusters", []):
+        bmap = c.get("brands") or {}
+        if not bmap:
+            continue
+        for b in order:
+            if resolve_brand_key(bmap, b) is None:
+                warnings.append(
+                    "cluster %r: brand %r has NO matching key in clusters.json "
+                    "(keys present: %s) -- its column would be empty."
+                    % (c.get("name"), b, sorted(bmap.keys())))
+    return warnings
+
+
+def assert_your_column(clusters, your):
+    """Fail loudly if the your-brand column is entirely zero across all clusters
+    that carry brand data — almost always a key mismatch, not a real result."""
+    cls = clusters.get("clusters", [])
+    if not cls or not any((c.get("brands") or {}) for c in cls):
+        return
+    total = sum(int(brand_entry(c.get("brands"), your).get("depth", 0) or 0) for c in cls)
+    if total == 0:
+        bar = "=" * 72
+        print("\n%s" % bar, file=sys.stderr)
+        print("ERROR: the your-brand column (%r) is ZERO across all %d clusters."
+              % (your, len(cls)), file=sys.stderr)
+        print("This almost always means clusters.json keyed your page under a", file=sys.stderr)
+        print("different string than meta.your_brand (e.g. 'OUR PAGE' or the URL)", file=sys.stderr)
+        print("-- a key mismatch, not a real 'your page covers nothing' result.", file=sys.stderr)
+        print("Fix: make every key in each cluster's 'brands' map exactly match", file=sys.stderr)
+        print("meta.your_brand / competitors[].brand. The report was written but", file=sys.stderr)
+        print("the your-brand column is INVALID until the keys are corrected.", file=sys.stderr)
+        print("%s\n" % bar, file=sys.stderr)
+        sys.exit(2)
 
 
 # --------------------- content helpers (the new value) ----------------------
@@ -234,7 +308,7 @@ def build_html(run_dir, meta, clusters, gaps, pages, your, order):
     for i, c in enumerate(clusters.get("clusters", [])):
         o.append(f"<tr><td style='text-align:left'><a href='#cl{i}'>{esc(c.get('name'))}</a></td>")
         for b in order:
-            d = int((c.get("brands") or {}).get(b, {}).get("depth", 0) or 0)
+            d = int(brand_entry(c.get("brands"), b).get("depth", 0) or 0)
             o.append(f"<td class='d{d}'>{d}</td>")
         o.append("</tr>")
     o.append("</tbody></table>")
@@ -246,7 +320,7 @@ def build_html(run_dir, meta, clusters, gaps, pages, your, order):
         o.append(f"<div class='cl' id='cl{i}'><h3>{esc(c.get('name'))}</h3><div class='cards'>")
         texts = {}
         for b in order:
-            info = (c.get("brands") or {}).get(b, {})
+            info = brand_entry(c.get("brands"), b)
             page = pbb.get(b, {})
             sec = best_section(page, c.get("name")) if info.get("present") else None
             txt = (sec.get("text") if sec else (info.get("snippet") or "")) or ""
@@ -299,13 +373,13 @@ def build_html(run_dir, meta, clusters, gaps, pages, your, order):
         if rank:
             o.append("<table><thead><tr><th>Page</th><th>Google search view</th><th>AI search / answer-engine view</th></tr></thead><tbody>")
             for b in order:
-                r = rank.get(b, {})
+                r = map_get(rank, b, {}) or {}
                 o.append(f"<tr><td>{esc(b)}</td><td>{esc(r.get('google'))}</td><td>{esc(r.get('ai_search'))}</td></tr>")
             o.append("</tbody></table>")
         if ext:
             o.append("<h3>External brands / third parties mentioned on each page</h3><ul>")
             for b in order:
-                names = ext.get(b) or []
+                names = map_get(ext, b) or []
                 o.append(f"<li><b>{esc(b)}</b>: {esc(', '.join(names)) if names else 'none detected'}</li>")
             o.append("</ul>")
 
@@ -369,7 +443,7 @@ def build_xlsx(run_dir, meta, clusters, gaps, pages, your, order):
 
     ws = sheet("Cluster Matrix", ["Cluster"] + order)
     for c in clusters.get("clusters", []):
-        ws.append([c.get("name")] + [int((c.get("brands") or {}).get(b, {}).get("depth", 0) or 0) for b in order])
+        ws.append([c.get("name")] + [int(brand_entry(c.get("brands"), b).get("depth", 0) or 0) for b in order])
     ws.auto_filter.ref = ws.dimensions
 
     # Full Content — every section, every page
@@ -388,7 +462,7 @@ def build_xlsx(run_dir, meta, clusters, gaps, pages, your, order):
         our_sec = best_section(pbb.get(your, {}), c.get("name"))
         our_txt = our_sec.get("text") if our_sec else ""
         for b in order:
-            info = (c.get("brands") or {}).get(b, {})
+            info = brand_entry(c.get("brands"), b)
             if not info.get("present"):
                 continue
             sec = best_section(pbb.get(b, {}), c.get("name"))
@@ -433,14 +507,14 @@ def build_xlsx(run_dir, meta, clusters, gaps, pages, your, order):
     if rank:
         ws = sheet("Ranking View", ["Page", "Google search view", "AI search view"])
         for b in order:
-            r = rank.get(b, {})
+            r = map_get(rank, b, {}) or {}
             ws.append([b, r.get("google"), r.get("ai_search")])
         ws.auto_filter.ref = ws.dimensions
     ext = gaps.get("external_brands", {})
     if ext:
         ws = sheet("External Brands", ["Page", "Brands / third parties mentioned"])
         for b in order:
-            ws.append([b, ", ".join(ext.get(b) or [])])
+            ws.append([b, ", ".join(map_get(ext, b) or [])])
         ws.auto_filter.ref = ws.dimensions
 
     # Gaps / FAQ / Quality
@@ -462,7 +536,7 @@ def build_xlsx(run_dir, meta, clusters, gaps, pages, your, order):
     ws = sheet("Quality", ["Page", "Words", "H2s", "FAQs", "Internal links", "Schema", "E-E-A-T", "Freshness"])
     q = (gaps.get("quality") or {}).get("per_brand", {})
     for b in order:
-        r = q.get(b, {})
+        r = map_get(q, b, {}) or {}
         ws.append([b, r.get("word_count"), r.get("h2"), r.get("faqs"), r.get("internal_links"),
                    ", ".join(r.get("schema", []) or []), "yes" if r.get("eeat") else "no", r.get("freshness")])
     ws.auto_filter.ref = ws.dimensions
@@ -480,6 +554,12 @@ def main():
         print("run_dir not found:", run_dir); sys.exit(1)
     meta, clusters, gaps, pages = load_run(run_dir)
     your, order = brand_order(meta, gaps, pages)
+
+    # Loud warnings BEFORE building — any canonical brand that won't resolve to a
+    # key in a populated cluster, so an empty column can never ship unnoticed.
+    for w in check_brand_keys(clusters, order):
+        print("WARN :", w, file=sys.stderr)
+
     print("HTML  ->", build_html(run_dir, meta, clusters, gaps, pages, your, order))
     xlsx_path, note = build_xlsx(run_dir, meta, clusters, gaps, pages, your, order)
     if xlsx_path:
@@ -487,6 +567,9 @@ def main():
     if note:
         print("NOTE :", note)
     print("Open report.html in a browser (Print -> Save as PDF to share).")
+
+    # Post-build assertion: a fully-zero your-brand column is a key mismatch.
+    assert_your_column(clusters, your)
 
 
 if __name__ == "__main__":

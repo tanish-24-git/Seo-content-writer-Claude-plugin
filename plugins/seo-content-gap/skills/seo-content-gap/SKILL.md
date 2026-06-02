@@ -47,8 +47,15 @@ Work inside the user's current directory. Create a run folder:
 ## Stage 3 — Align, cluster, gap engine
 - Spawn the `gap-analyst` agent with `run_dir`. It writes `clusters.json` and `gaps.json`
   following `gap-rubric.md`.
-- Sanity-check the output: clusters cover the real sections; gaps are specific (quote real
-  numbers/example names); recommendations say *what to write*, not the prose.
+- **Echo the canonical brand list into the agent prompt** — copy `your_brand` and every
+  `competitors[].brand` verbatim from `meta.json` and tell the agent these are the **exact, only**
+  strings it may use as keys in every brand-keyed map (`brands`, `quality.per_brand`,
+  `ranking_assessment`, `external_brands`). The user's page is keyed by `your_brand` — never
+  "OUR PAGE", a short form, or a URL. A mismatched key silently empties that report column.
+- Sanity-check the output before building: open `clusters.json` and confirm every cluster's
+  `brands` keys are drawn **only** from that canonical list (especially that `your_brand` is
+  present, not an "ours"-style label). Then verify clusters cover the real sections; gaps are
+  specific (quote real numbers/example names); recommendations say *what to write*, not the prose.
 
 ## Stage 4 — Build the reports
 - Run: `python "${CLAUDE_PLUGIN_ROOT}/scripts/build_report.py" "<run_dir>"`
