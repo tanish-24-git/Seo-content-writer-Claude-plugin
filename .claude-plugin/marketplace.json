@@ -12,7 +12,7 @@
       "name": "seo-content-gap",
       "source": "./plugins/seo-content-gap",
       "description": "Point it at one of your pages + competitor pages (or let it web-search competitors). It crawls each page, aligns them block-to-block and FAQ-to-FAQ, clusters topics, checks search ranking, and produces a gap report (HTML/PDF + XLSX) plus a conversational session. It identifies what each competitor wrote, how they differ, content quality, internal-linking gaps, and what you should write — it does NOT generate the final copy.",
-      "version": "0.4.0",
+      "version": "0.4.1",
       "category": "seo",
       "keywords": ["seo", "content", "gap-analysis", "competitor", "fintech", "report"]
     }

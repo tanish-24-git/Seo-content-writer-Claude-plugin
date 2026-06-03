@@ -26,10 +26,16 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 HEADERS = {"User-Agent": UA, "Accept-Language": "en-IN,en;q=0.9",
            "Accept": "text/html,application/xhtml+xml"}
-SKIP = {"script", "style", "noscript", "svg", "template"}
+SKIP = {"script", "style", "noscript", "svg", "template",
+        "select", "option", "datalist"}  # form pickers (country/city dropdowns) = noise
 HEADINGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
 CHROME = {"nav", "footer", "header", "aside"}
 SEC_CAP = 6000  # max chars of body text kept per section
+# Long runs of phone country codes ("+91 +1 (USA) +1 (CAN) ...") leak in from
+# custom (non-<select>) phone widgets; 4+ consecutive "+code" tokens = a picker.
+_PHONE_CODE_RUN = re.compile(r'(?:\+\d{1,4}(?:\s*\([^)]{1,8}\))?\s*){4,}')
+_INCOME_BAND_RUN = re.compile(
+    r'(?:[<>]?\s*\d[\d.,]*\s*(?:-\s*\d[\d.,]*)?\s*Lakhs?\b[\s,]*){2,}', re.I)
 
 
 def reg_domain(host):
@@ -79,6 +85,9 @@ class PageParser(HTMLParser):
     def _flush_section(self):
         text = re.sub(r"[ \t]+", " ", " ".join(self._sec_buf))
         text = re.sub(r"\s*\n\s*", " ", text).strip()
+        text = _PHONE_CODE_RUN.sub(" ", text)
+        text = _INCOME_BAND_RUN.sub(" ", text)
+        text = re.sub(r"\s{2,}", " ", text).strip()
         if text:
             self.sections.append({
                 "level": self._sec_level,

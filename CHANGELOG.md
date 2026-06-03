@@ -3,6 +3,20 @@
 All notable changes to the SEO Content-Gap plugin are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.1] — 2026-06-03
+### Added
+- **FAQs by company** — a per-company section (+ **FAQs by Company** XLSX sheet) listing every FAQ
+  each page publishes verbatim: the exact question and how that company answered it, segregated by
+  page.
+- **Header tags as tables** — the H1/H2/H3 outline now renders as a clean Tag │ Heading table per
+  page (was an indented list).
+### Fixed
+- **Form-widget junk in section text** — long phone country-code runs ("+91 +1 (USA) +1 (CAN) …")
+  from premium-calculator phone pickers, and income-band picker runs ("< 2.5 Lakhs 2.5 - 5 Lakhs
+  …"), are now stripped at the extraction source and in the report. `<select>/<option>/<datalist>`
+  are also skipped during extraction. (Known residue: custom non-`<select>` country-*name*
+  dropdowns can still leak on some calculator pages.)
+
 ## [0.4.0] — 2026-06-03
 ### Added
 - **Full page structure** section (HTML + PDF): per-company dropdown reproducing each page as

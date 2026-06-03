@@ -62,6 +62,24 @@ def esc(x):
     return html.escape(str(x if x is not None else ""))
 
 
+# Strip form-widget noise that leaks into extracted section text — long runs of
+# phone country codes (e.g. "+91 +1 (USA) +1 (CAN) +61 (AUS) +65 +962 ...") from
+# the phone-number dropdown on premium-calculator forms. 4+ consecutive "+code"
+# tokens is a country picker, never prose.
+_PHONE_CODE_RUN = re.compile(r'(?:\+\d{1,4}(?:\s*\([^)]{1,8}\))?\s*){4,}')
+# Income-band picker runs, e.g. "< 2.5 Lakhs 2.5 - 5 Lakhs 5 - 7.5 Lakhs ...".
+_INCOME_BAND_RUN = re.compile(
+    r'(?:[<>]?\s*\d[\d.,]*\s*(?:-\s*\d[\d.,]*)?\s*Lakhs?\b[\s,]*){2,}', re.I)
+
+
+def clean_text(t):
+    if not t:
+        return t
+    t = _PHONE_CODE_RUN.sub(" ", t)
+    t = _INCOME_BAND_RUN.sub(" ", t)
+    return re.sub(r"\s{2,}", " ", t).strip()
+
+
 def page_by_brand(pages):
     return {p.get("brand"): p for p in pages}
 
@@ -267,7 +285,9 @@ summary{cursor:pointer;font-weight:600;color:#1e3a8a}small{color:#64748b}code{ba
 .s3{margin-left:34px}.s3 .sh{font-size:13.5px}
 .s4{margin-left:52px}.s4 .sh{font-size:12.5px}
 .s0 .sh{font-style:italic;color:#64748b;font-weight:600}.s0 .tag{background:#64748b}
-@media print{details{break-inside:avoid}.cl{break-inside:avoid}.srow{break-inside:avoid}}
+.faq{border-left:3px solid #cbd5e1;padding:2px 0 2px 10px;margin:8px 0}
+.faq .q{font-weight:700;color:#0f172a}.faq .a{color:#334155;font-size:12.5px;margin-top:2px;white-space:pre-wrap}
+@media print{details{break-inside:avoid}.cl{break-inside:avoid}.srow{break-inside:avoid}.faq{break-inside:avoid}}
 """
 FILTER_JS = "function f(){var q=(document.getElementById('q').value||'').toLowerCase();var t=document.getElementById('ft').value,p=document.getElementById('fp').value;document.querySelectorAll('#gaps tbody tr').forEach(function(r){var okq=r.innerText.toLowerCase().indexOf(q)>=0;var okt=!t||r.dataset.type===t;var okp=!p||r.dataset.prio===p;r.style.display=(okq&&okt&&okp)?'':'none';});}"
 # Expand every <details> when printing so the full page-structure (and other
@@ -277,13 +297,16 @@ PRINT_JS = ("window.addEventListener('beforeprint',function(){document.querySele
 
 
 def outline_html(page):
-    rows = []
-    for h in page.get("heading_outline", [])[:140]:
-        lvl = int(h.get("level", 2) or 2)
-        rows.append(f'<div class="ol" style="margin-left:{(lvl-1)*18}px"><span class="lvl">H{lvl}</span> {esc(h.get("text"))}</div>')
     hc = page.get("heading_counts", {})
     cap = f'<small>H1:{hc.get("h1",0)} · H2:{hc.get("h2",0)} · H3:{hc.get("h3",0)} · H4+:{hc.get("h4_plus",0)} · words:{page.get("word_count_total",0)}</small>'
-    return cap + "".join(rows)
+    rows = []
+    for h in page.get("heading_outline", [])[:250]:
+        lvl = int(h.get("level", 2) or 2)
+        rows.append(f'<tr><td><b>H{lvl}</b></td><td style="padding-left:{(lvl-1)*16}px">{esc(h.get("text"))}</td></tr>')
+    if not rows:
+        return cap + " <small>— no headings captured</small>"
+    return (cap + "<table><thead><tr><th style='width:56px'>Tag</th><th>Heading</th></tr></thead><tbody>"
+            + "".join(rows) + "</tbody></table>")
 
 
 def links_table(links, limit=60):
@@ -341,7 +364,7 @@ def build_html(run_dir, meta, clusters, gaps, pages, your, order):
     o.append("<div class='toc'><b>Jump to:</b> <a href='#kpi'>Overview</a><a href='#titles'>Titles &amp; H1</a>"
              "<a href='#matrix'>Cluster map</a><a href='#unique'>Unique coverage</a><a href='#coverage'>Coverage per company</a>"
              "<a href='#content'>What each wrote (side-by-side)</a><a href='#struct'>Headings</a>"
-             "<a href='#structure'>Page structure</a>"
+             "<a href='#structure'>Page structure</a><a href='#faqs'>FAQs</a>"
              "<a href='#links'>Links</a><a href='#images'>Images</a><a href='#rank'>Ranking view</a>"
              "<a href='#gaps'>Gaps</a></div>")
 
@@ -480,6 +503,24 @@ def build_html(run_dir, meta, clusters, gaps, pages, your, order):
                f"{len(p.get('sections', []))} sections · {p.get('word_count_total',0)} words")
         o.append(f"<details{opn}><summary>{esc(p.get('brand'))}{' — OUR PAGE' if p.get('is_ours') else ''} · "
                  f"<span class='mono'>{esc(p.get('url') or '')}</span> — {cap}</summary>{structure_html(p)}</details>")
+
+    # FAQs per company — verbatim question + answer, segregated by page
+    o.append("<h2 id='faqs'>FAQs by company — verbatim questions &amp; answers</h2>")
+    o.append("<small>Every FAQ each page publishes, exactly as written — the question and how that company answered it. Compare phrasing and depth across competitors.</small>")
+    for b in order:
+        p = pbb.get(b)
+        if not p:
+            continue
+        fqs = p.get("faqs") or []
+        opn = " open" if p.get("is_ours") else ""
+        if fqs:
+            inner = "".join(
+                f"<div class='faq'><div class='q'>Q: {esc(q.get('question'))}</div>"
+                f"<div class='a'>{esc(q.get('answer')) or '<i>(no answer captured)</i>'}</div></div>"
+                for q in fqs)
+        else:
+            inner = "<small>no FAQs captured on this page</small>"
+        o.append(f"<details{opn}><summary>{esc(b)}{' — OUR PAGE' if p.get('is_ours') else ''} · {len(fqs)} FAQs</summary>{inner}</details>")
 
     # links — internal restricted to on-page (nav/header/footer excluded)
     o.append("<h2 id='links'>Internal &amp; external links per page</h2><small>Internal = <b>on-page editorial links only</b> — nav, header &amp; footer boilerplate excluded. Parsed from raw HTML.</small>")
@@ -714,6 +755,21 @@ def build_xlsx(run_dir, meta, clusters, gaps, pages, your, order):
         ws.append([q.get("question"), ", ".join(q.get("answered_by", []))])
     ws.auto_filter.ref = ws.dimensions
 
+    # FAQs by Company — verbatim Q&A, segregated per page
+    ws = sheet("FAQs by Company", ["Company", "Question", "Answer"])
+    for b in order:
+        p = pbb.get(b)
+        if not p:
+            continue
+        for q in (p.get("faqs") or []):
+            ws.append([b, q.get("question"), q.get("answer")])
+    ws.column_dimensions["B"].width = 55
+    ws.column_dimensions["C"].width = 90
+    for row in ws.iter_rows(min_row=2, min_col=2, max_col=3):
+        for c in row:
+            c.alignment = wrap
+    ws.auto_filter.ref = ws.dimensions
+
     ws = sheet("Quality", ["Page", "Words", "H2s", "FAQs", "Internal links", "Schema", "E-E-A-T", "Freshness"])
     q = (gaps.get("quality") or {}).get("per_brand", {})
     for b in order:
@@ -735,6 +791,12 @@ def main():
         print("run_dir not found:", run_dir); sys.exit(1)
     meta, clusters, gaps, pages = load_run(run_dir)
     your, order = brand_order(meta, gaps, pages)
+
+    # Scrub form-widget junk (phone country-code runs) from every section's text
+    # so it never appears in the structure / side-by-side / workbook.
+    for p in pages:
+        for s in (p.get("sections") or []):
+            s["text"] = clean_text(s.get("text"))
 
     # Loud warnings BEFORE building — any canonical brand that won't resolve to a
     # key in a populated cluster, so an empty column can never ship unnoticed.
