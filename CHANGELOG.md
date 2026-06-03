@@ -3,6 +3,34 @@
 All notable changes to the SEO Content-Gap plugin are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] — 2026-06-03
+### Added
+- **Full page structure** section (HTML + PDF): per-company dropdown reproducing each page as
+  published — `H1`/`H2`/`H3` tag + heading + the copy beneath it, in document order, your page
+  first. New **Page Structure** XLSX sheet (Page · Order · Tag · Heading · Words · Content). Print
+  now expands all dropdowns so they appear in the Save-as-PDF output.
+- **Unique coverage** view — topics that exactly ONE compared page covers (per-company unique
+  angle), as an HTML table + **Unique Coverage** XLSX sheet. gap-analyst now emits single-brand
+  clusters so unique topics are never dropped.
+- **Pages analysed — title & H1** table (page `<title>` + `<h1>` + URL per company) + **Page
+  Titles & H1** XLSX sheet.
+- **Topic coverage per company** — per-company dropdown of covered topics with depth, the heading
+  on their page, and a deep-link that opens that exact section live; **Topic Coverage** XLSX sheet.
+### Changed
+- **Internal links are now on-page only** — nav, header and footer boilerplate is excluded
+  everywhere (counts, charts, tables, XLSX) and at the extraction source (`extract_page.py`), so
+  the gap analysis reflects real in-content linking. (e.g. a page with 500 raw internal links but
+  475 in nav now reports 12 on-page.) Detection keys off semantic `<nav>/<header>/<footer>/<aside>`.
+
+## [0.3.1] — 2026-06-02
+### Fixed
+- **Your-brand column rendered all zeros** when clusters.json keyed a page under a non-canonical
+  name (e.g. `"OUR PAGE"`). Fixed in both layers: gap-analyst now mandates exact `meta.json`
+  brand keys (examples no longer show `"OUR PAGE"`) and the orchestrator echoes the canonical
+  brand list into the agent; `build_report.py` resolves brand keys case/whitespace-insensitively,
+  warns loudly on any unmatched canonical brand in a populated cluster, and fails the build if the
+  your-brand column is entirely zero (almost always a key mismatch, not a real result).
+
 ## [0.3.0] — 2026-06-02
 ### Added — "show the real content, not just a score"
 - `extract_page.py` now also captures the **actual body text under every heading** (`sections[].text`)

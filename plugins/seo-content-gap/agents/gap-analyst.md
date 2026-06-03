@@ -33,6 +33,11 @@ into **topic clusters** (e.g. "What is X", "How it works", "How much cover / siz
 "Comparisons (vs X)", "Trust/CSR", "FAQs"). A cluster is the same *idea* even when each brand
 titled it differently.
 
+**Also create single-brand (UNIQUE) clusters.** Do not cluster only the shared/common topics —
+when exactly ONE page covers a distinct topic the others don't, still emit it as its own cluster
+(with just that brand present). These unique clusters power the report's "Unique coverage" view,
+so a topic only one company owns must not be dropped.
+
 ## Step 2 — For each cluster, record who covers it and how deeply
 For every brand, capture: present (bool), depth (0–3: absent/mention/standard/deep), word_count,
 has_example, has_table, and a short snippet of how they wrote it.
@@ -45,8 +50,9 @@ Classify each finding as one of:
 - **unique** — only OUR page covers it → KEEP/PROMOTE.
 - **faq** — a question competitors answer that OUR FAQ does not.
 - **link** — an internal-link target/topic competitors link that OUR page does not. Use the
-  **accurate `internal_links`** list (parsed from HTML by extract_page.py); prefer in-content
-  links over nav/footer, and compare unique-target counts, not just totals.
+  **accurate `internal_links`** list (parsed from HTML by extract_page.py — already restricted to
+  ON-PAGE editorial links; nav/header/footer boilerplate is excluded). Compare unique-target
+  counts, not just totals.
 - **example** — competitors use a worked example/number/table where OUR page uses prose only.
 - **quality** — OUR page trails on a quality signal (word count, schema, author/reviewer
   E-E-A-T, freshness, readability).

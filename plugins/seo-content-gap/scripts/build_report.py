@@ -100,6 +100,34 @@ def brand_entry(brand_map, canonical):
     return map_get(brand_map, canonical, {}) or {}
 
 
+# Internal links inside nav / header / footer are site-wide boilerplate, not
+# on-page editorial links. Exclude them everywhere (counts, charts, tables, gap
+# analysis) so internal-link comparisons reflect real in-content linking only.
+NAV_FOOTER_SCOPES = {"nav", "header", "footer"}
+
+
+def onpage_internal_links(page):
+    """A page's internal links with nav/header/footer boilerplate stripped out."""
+    return [l for l in (page.get("internal_links") or [])
+            if (l.get("scope") or "in-content") not in NAV_FOOTER_SCOPES]
+
+
+def covers(info):
+    """True if a brand actually addresses a cluster (present flag or depth > 0)."""
+    return bool(info.get("present")) or int(info.get("depth", 0) or 0) > 0
+
+
+def unique_clusters_by_brand(clusters, order):
+    """Map brand -> [cluster names] that ONLY that brand covers — the unique
+    content angle no other compared page has."""
+    out = {b: [] for b in order}
+    for c in clusters.get("clusters", []):
+        owners = [b for b in order if covers(brand_entry(c.get("brands"), b))]
+        if len(owners) == 1:
+            out[owners[0]].append(c.get("name"))
+    return out
+
+
 def check_brand_keys(clusters, order):
     """Loud per-cluster warnings: a canonical brand that resolves to NO key in a
     cluster that DOES carry brand data — that column would render empty."""
@@ -229,9 +257,23 @@ th{background:#eef2ff}.matrix td{text-align:center;font-weight:600}
 details{border:1px solid #e2e8f0;border-radius:8px;padding:8px 12px;margin:8px 0;background:#fbfdff}
 summary{cursor:pointer;font-weight:600;color:#1e3a8a}small{color:#64748b}code{background:#f1f5f9;padding:1px 5px;border-radius:4px}
 .controls input,.controls select{padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;margin-right:6px}
-@media print{details{break-inside:avoid}.cl{break-inside:avoid}}
+.struct{margin:6px 0 2px;border-left:2px solid #e2e8f0;padding-left:10px}
+.srow{margin:3px 0}
+.srow .tag{display:inline-block;min-width:30px;font-family:monospace;font-size:10px;font-weight:700;color:#fff;background:#1e3a8a;border-radius:4px;padding:1px 5px;text-align:center;margin-right:6px;vertical-align:middle}
+.srow .sh{font-weight:700;color:#0f172a}
+.srow .sc{color:#334155;margin:3px 0 9px;white-space:pre-wrap;font-size:12.5px}
+.s1{margin-left:0}.s1 .sh{font-size:18px}
+.s2{margin-left:16px}.s2 .sh{font-size:15px}
+.s3{margin-left:34px}.s3 .sh{font-size:13.5px}
+.s4{margin-left:52px}.s4 .sh{font-size:12.5px}
+.s0 .sh{font-style:italic;color:#64748b;font-weight:600}.s0 .tag{background:#64748b}
+@media print{details{break-inside:avoid}.cl{break-inside:avoid}.srow{break-inside:avoid}}
 """
 FILTER_JS = "function f(){var q=(document.getElementById('q').value||'').toLowerCase();var t=document.getElementById('ft').value,p=document.getElementById('fp').value;document.querySelectorAll('#gaps tbody tr').forEach(function(r){var okq=r.innerText.toLowerCase().indexOf(q)>=0;var okt=!t||r.dataset.type===t;var okp=!p||r.dataset.prio===p;r.style.display=(okq&&okt&&okp)?'':'none';});}"
+# Expand every <details> when printing so the full page-structure (and other
+# collapsible sections) render in the Print -> Save-as-PDF output, then restore.
+PRINT_JS = ("window.addEventListener('beforeprint',function(){document.querySelectorAll('details').forEach(function(d){d.setAttribute('data-o',d.open?'1':'0');d.open=true;});});"
+            "window.addEventListener('afterprint',function(){document.querySelectorAll('details').forEach(function(d){d.open=d.getAttribute('data-o')==='1';});});")
 
 
 def outline_html(page):
@@ -267,6 +309,24 @@ def images_table(imgs, limit=40):
     return "".join(out)
 
 
+def structure_html(page):
+    """Replicate the page's published structure: every heading (with its H-tag
+    and a level indent) followed by the copy beneath it, in document order."""
+    rows = []
+    for s in page.get("sections", []):
+        lvl = int(s.get("level", 2) or 0)
+        cls = "s%d" % (lvl if 0 <= lvl <= 4 else 4)
+        tag = "intro" if lvl == 0 else "H%d" % lvl
+        heading = esc(s.get("heading") or ("(intro / pre-heading copy)" if lvl == 0 else "(untitled)"))
+        text = esc(s.get("text") or "")
+        body = f'<div class="sc">{text}</div>' if text else '<div class="sc"><i>(no text captured)</i></div>'
+        rows.append(f'<div class="srow {cls}"><span class="tag">{tag}</span>'
+                    f'<span class="sh">{heading}</span> <small>· {esc(s.get("word_count"))} words</small>{body}</div>')
+    if not rows:
+        return "<small>no sections captured for this page</small>"
+    return '<div class="struct">' + "".join(rows) + "</div>"
+
+
 def build_html(run_dir, meta, clusters, gaps, pages, your, order):
     pbb = page_by_brand(pages)
     k = gaps.get("kpis", {})
@@ -278,8 +338,10 @@ def build_html(run_dir, meta, clusters, gaps, pages, your, order):
          f"<title>Content-Gap Report — {topic}</title><style>{CSS}</style></head><body>"]
     o.append(f"<h1>Content-Gap Report — {topic}</h1>")
     o.append(f"<small>Your page: <code>{esc(gaps.get('your_url') or meta.get('your_url'))}</code> · type: <b>{esc(gaps.get('page_type') or meta.get('page_type'))}</b> · pages compared: {len(order)}</small>")
-    o.append("<div class='toc'><b>Jump to:</b> <a href='#kpi'>Overview</a><a href='#matrix'>Cluster map</a>"
+    o.append("<div class='toc'><b>Jump to:</b> <a href='#kpi'>Overview</a><a href='#titles'>Titles &amp; H1</a>"
+             "<a href='#matrix'>Cluster map</a><a href='#unique'>Unique coverage</a><a href='#coverage'>Coverage per company</a>"
              "<a href='#content'>What each wrote (side-by-side)</a><a href='#struct'>Headings</a>"
+             "<a href='#structure'>Page structure</a>"
              "<a href='#links'>Links</a><a href='#images'>Images</a><a href='#rank'>Ranking view</a>"
              "<a href='#gaps'>Gaps</a></div>")
 
@@ -296,8 +358,21 @@ def build_html(run_dir, meta, clusters, gaps, pages, your, order):
     o.append("<div class='charts'>")
     o.append(svg_bar("Total words", [(p.get("brand", "?"), p.get("word_count_total", 0)) for p in pages]))
     o.append(svg_bar("H2 headings", [(p.get("brand", "?"), (p.get("heading_counts", {}) or {}).get("h2", 0)) for p in pages]))
-    o.append(svg_bar("Internal links", [(p.get("brand", "?"), p.get("internal_link_count", 0)) for p in pages]))
+    o.append(svg_bar("Internal links (on-page)", [(p.get("brand", "?"), len(onpage_internal_links(p))) for p in pages]))
     o.append("</div>")
+
+    # pages analysed — page title + H1 per company
+    o.append("<h2 id='titles'>Pages analysed — title &amp; H1</h2>")
+    o.append("<small>The exact &lt;title&gt; and &lt;h1&gt; of each page compared, with its URL.</small>")
+    o.append("<table><thead><tr><th>Company</th><th>Page title</th><th>H1</th><th>URL</th></tr></thead><tbody>")
+    for b in order:
+        p = pbb.get(b)
+        if not p:
+            continue
+        o.append(f"<tr><td><b>{esc(b)}</b>{' (you)' if b == your else ''}</td>"
+                 f"<td>{esc(p.get('title'))}</td><td>{esc(p.get('h1'))}</td>"
+                 f"<td class='mono'><a href='{esc(p.get('url') or '#')}' target='_blank'>{esc(p.get('url'))}</a></td></tr>")
+    o.append("</tbody></table>")
 
     # cluster matrix (diagram)
     o.append("<h2 id='matrix'>Cluster coverage map</h2><small>0 absent · 1 mention · 2 standard · 3 deep. Click a cluster to jump to the side-by-side content.</small>")
@@ -312,6 +387,42 @@ def build_html(run_dir, meta, clusters, gaps, pages, your, order):
             o.append(f"<td class='d{d}'>{d}</td>")
         o.append("</tr>")
     o.append("</tbody></table>")
+
+    # unique coverage — topics only ONE page covers
+    uniq = unique_clusters_by_brand(clusters, order)
+    o.append("<h2 id='unique'>Unique coverage — topics only one page covers</h2>")
+    o.append("<small>Clusters that exactly one company addresses — a distinct angle the others miss. Yours = keep &amp; promote; a rival's = a gap you could close.</small>")
+    o.append("<table><thead><tr><th>Company</th><th>Topics only this page covers</th></tr></thead><tbody>")
+    for b in order:
+        items = uniq.get(b) or []
+        cell = ", ".join(esc(x) for x in items) if items else "<small>none</small>"
+        o.append(f"<tr><td><b>{esc(b)}</b>{' (you)' if b == your else ''}</td><td>{cell}</td></tr>")
+    o.append("</tbody></table>")
+
+    # topic coverage per company — what each covers + a deep-link to that section
+    o.append("<h2 id='coverage'>Topic coverage per company — with section links</h2>")
+    o.append("<small>Per company: the topics they cover, how deep (0–3), the heading on their page, and a link that opens that exact section live. Click a company to expand.</small>")
+    for b in order:
+        p = pbb.get(b)
+        if not p:
+            continue
+        rows = []
+        for c in clusters.get("clusters", []):
+            info = brand_entry(c.get("brands"), b)
+            if not covers(info):
+                continue
+            d = int(info.get("depth", 0) or 0)
+            sec = best_section(p, c.get("name"))
+            head = (sec.get("heading") if sec else "") or info.get("section_heading") or ""
+            dl = textfrag(p.get("url"), head) if head else (p.get("url") or "#")
+            link = f"<a href='{esc(dl)}' target='_blank'>open ↗</a>" if head else "<small>—</small>"
+            rows.append(f"<tr><td>{esc(c.get('name'))}</td><td class='d{d}' style='text-align:center'>{d}</td>"
+                        f"<td>{esc(head)}</td><td>{link}</td></tr>")
+        body = ("<table><thead><tr><th>Topic</th><th>Depth</th><th>Section heading on page</th><th>Link</th></tr></thead><tbody>"
+                + "".join(rows) + "</tbody></table>") if rows else "<small>no covered topics captured for this page</small>"
+        opn = " open" if p.get("is_ours") else ""
+        o.append(f"<details{opn}><summary>{esc(b)}{' — OUR PAGE' if p.get('is_ours') else ''} · "
+                 f"<small>{esc(p.get('title'))}</small></summary>{body}</details>")
 
     # side-by-side: what each wrote, with similarity + deep links
     o.append("<h2 id='content'>What each page actually wrote — side by side</h2>")
@@ -356,11 +467,26 @@ def build_html(run_dir, meta, clusters, gaps, pages, your, order):
         opn = " open" if p.get("is_ours") else ""
         o.append(f"<details{opn}><summary>{esc(p.get('brand'))}{' — OUR PAGE' if p.get('is_ours') else ''}</summary>{outline_html(p)}</details>")
 
-    # links
-    o.append("<h2 id='links'>Internal &amp; external links per page</h2><small>Parsed from raw HTML — counts are exact.</small>")
+    # full page structure — every heading + the content beneath it, in page order
+    o.append("<h2 id='structure'>Full page structure — every heading + its content (page order)</h2>")
+    o.append("<small>Each page reproduced as published: the H1/H2/H3 tag, the heading text, and the copy beneath it, in order — so you can see exactly where each heading sits on the live page. Click a page to expand.</small>")
+    for b in order:
+        p = pbb.get(b)
+        if not p:
+            continue
+        opn = " open" if p.get("is_ours") else ""
+        hc = p.get("heading_counts", {}) or {}
+        cap = (f"H1:{hc.get('h1',0)} · H2:{hc.get('h2',0)} · H3:{hc.get('h3',0)} · "
+               f"{len(p.get('sections', []))} sections · {p.get('word_count_total',0)} words")
+        o.append(f"<details{opn}><summary>{esc(p.get('brand'))}{' — OUR PAGE' if p.get('is_ours') else ''} · "
+                 f"<span class='mono'>{esc(p.get('url') or '')}</span> — {cap}</summary>{structure_html(p)}</details>")
+
+    # links — internal restricted to on-page (nav/header/footer excluded)
+    o.append("<h2 id='links'>Internal &amp; external links per page</h2><small>Internal = <b>on-page editorial links only</b> — nav, header &amp; footer boilerplate excluded. Parsed from raw HTML.</small>")
     for p in pages:
-        o.append(f"<details><summary>{esc(p.get('brand'))} — {p.get('internal_link_count',0)} internal · {p.get('external_link_count',0)} external</summary>"
-                 f"<h3>Internal</h3>{links_table(p.get('internal_links', []))}<h3>External</h3>{links_table(p.get('external_links', []))}</details>")
+        op = onpage_internal_links(p)
+        o.append(f"<details><summary>{esc(p.get('brand'))} — {len(op)} on-page internal · {p.get('external_link_count',0)} external</summary>"
+                 f"<h3>Internal (on-page)</h3>{links_table(op)}<h3>External</h3>{links_table(p.get('external_links', []))}</details>")
 
     # images
     o.append("<h2 id='images'>Images per page</h2>")
@@ -396,7 +522,7 @@ def build_html(run_dir, meta, clusters, gaps, pages, your, order):
     o.append("</tbody></table>")
 
     o.append("<hr><small>SEO Content-Gap Analyzer — identifies gaps & shows real competitor content for reference. Not publishable copy. Links/headings/images parsed from live HTML; verify before publishing.</small>")
-    o.append(f"<script>{FILTER_JS}</script></body></html>")
+    o.append(f"<script>{FILTER_JS}{PRINT_JS}</script></body></html>")
     path = os.path.join(run_dir, "report.html")
     with open(path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(o))
@@ -446,6 +572,43 @@ def build_xlsx(run_dir, meta, clusters, gaps, pages, your, order):
         ws.append([c.get("name")] + [int(brand_entry(c.get("brands"), b).get("depth", 0) or 0) for b in order])
     ws.auto_filter.ref = ws.dimensions
 
+    # Page Titles & H1 — one row per company
+    ws = sheet("Page Titles & H1", ["Company", "Title", "H1", "URL"])
+    for b in order:
+        p = pbb.get(b)
+        if not p:
+            continue
+        ws.append([b, p.get("title"), p.get("h1"), p.get("url")])
+    ws.column_dimensions["B"].width = 50
+    ws.column_dimensions["C"].width = 40
+    ws.auto_filter.ref = ws.dimensions
+
+    # Unique Coverage — topics only one company covers
+    ws = sheet("Unique Coverage", ["Company", "Topic only this page covers"])
+    uniq = unique_clusters_by_brand(clusters, order)
+    for b in order:
+        for t in (uniq.get(b) or []):
+            ws.append([b, t])
+    ws.auto_filter.ref = ws.dimensions
+
+    # Topic Coverage — per company: covered topics + deep-link to that section
+    ws = sheet("Topic Coverage", ["Company", "Topic", "Depth", "Section heading", "Section link"])
+    for b in order:
+        p = pbb.get(b)
+        if not p:
+            continue
+        for c in clusters.get("clusters", []):
+            info = brand_entry(c.get("brands"), b)
+            if not covers(info):
+                continue
+            sec = best_section(p, c.get("name"))
+            head = (sec.get("heading") if sec else "") or info.get("section_heading") or ""
+            link = textfrag(p.get("url"), head) if head else (p.get("url") or "")
+            ws.append([b, c.get("name"), int(info.get("depth", 0) or 0), head, link])
+    ws.column_dimensions["B"].width = 40
+    ws.column_dimensions["E"].width = 60
+    ws.auto_filter.ref = ws.dimensions
+
     # Full Content — every section, every page
     ws = sheet("Full Content", ["Page", "Level", "Heading", "Words", "Text"])
     for p in pages:
@@ -453,6 +616,23 @@ def build_xlsx(run_dir, meta, clusters, gaps, pages, your, order):
             ws.append([p.get("brand"), "H" + str(s.get("level", "")), s.get("heading"), s.get("word_count"), s.get("text")])
     ws.column_dimensions["E"].width = 90
     for row in ws.iter_rows(min_row=2, min_col=5, max_col=5):
+        row[0].alignment = wrap
+    ws.auto_filter.ref = ws.dimensions
+
+    # Page Structure — published heading + its content in page order. One sheet;
+    # filter the Page column to replicate any single site's full structure.
+    ws = sheet("Page Structure", ["Page", "Order", "Tag", "Heading", "Words", "Content"])
+    for b in order:
+        p = pbb.get(b)
+        if not p:
+            continue
+        for i, s in enumerate(p.get("sections", []), 1):
+            lvl = int(s.get("level", 2) or 0)
+            tag = "intro" if lvl == 0 else "H%d" % lvl
+            ws.append([p.get("brand"), i, tag, s.get("heading"), s.get("word_count"), s.get("text")])
+    ws.column_dimensions["D"].width = 42
+    ws.column_dimensions["F"].width = 90
+    for row in ws.iter_rows(min_row=2, min_col=6, max_col=6):
         row[0].alignment = wrap
     ws.auto_filter.ref = ws.dimensions
 
@@ -484,9 +664,10 @@ def build_xlsx(run_dir, meta, clusters, gaps, pages, your, order):
                     ws.append([p.get("brand"), h.get("text")])
         ws.auto_filter.ref = ws.dimensions
 
+    # Internal links — on-page only (nav/header/footer boilerplate excluded)
     ws = sheet("Internal Links", ["Page", "Anchor", "Target", "Section", "Scope"])
     for p in pages:
-        for l in p.get("internal_links", []):
+        for l in onpage_internal_links(p):
             ws.append([p.get("brand"), l.get("anchor"), l.get("href"), l.get("section"), l.get("scope")])
     ws.auto_filter.ref = ws.dimensions
 

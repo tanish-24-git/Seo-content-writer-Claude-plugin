@@ -211,7 +211,12 @@ def main():
     p = PageParser(final_url)
     p.feed(html)
     p._flush_section()
-    internal = [l for l in p.links if l["internal"]]
+    # Internal links restricted to ON-PAGE editorial links only: nav, header and
+    # footer are site-wide boilerplate, never on-page internal linking. Excluded
+    # here so the report and the gap analysis only ever see real in-content links.
+    NAV_FOOTER = {"nav", "header", "footer"}
+    internal_all = [l for l in p.links if l["internal"]]
+    internal = [l for l in internal_all if l.get("scope") not in NAV_FOOTER]
     external = [l for l in p.links if not l["internal"]]
     data = {
         "url": final_url, "title": p.title, "meta_description": p.meta_desc, "h1": p.h1,
@@ -219,6 +224,7 @@ def main():
         "sections": p.sections[:120],
         "internal_link_count": len(internal),
         "unique_internal_targets": len({l["href"] for l in internal}),
+        "internal_links_navfooter_excluded": len(internal_all) - len(internal),
         "external_link_count": len(external),
         "internal_links": internal[:500],
         "external_links": external[:120],
