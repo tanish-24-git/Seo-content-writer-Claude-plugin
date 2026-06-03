@@ -3,6 +3,19 @@
 All notable changes to the SEO Content-Gap plugin are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.2] — 2026-06-04
+### Added
+- **Heading Coverage matrix** — H1/H2/H3 × company **Yes/No** table (HTML) + **Heading Coverage**
+  XLSX sheet, modelled on the "Term Category Page" Sheet5 format: every distinct H1/H2/H3 heading
+  across the pages, its text placed in its level column, and a Yes/No per company (matched
+  case/punctuation-insensitively). Sorted by level, then by how many pages share the heading.
+### Changed — XLSX is now presentable
+- New **Charts** sheet with per-company bar charts (Total words, Sections, FAQs, on-page internal
+  links) — the workbook now opens on visuals, like the HTML.
+- **Cluster Matrix** depth cells get a red→amber→green colour scale (reads like the HTML heat-map).
+- **Heading Coverage** Yes/No cells are conditionally green/red.
+- Sensible column widths across the key sheets.
+
 ## [0.4.1] — 2026-06-03
 ### Added
 - **FAQs by company** — a per-company section (+ **FAQs by Company** XLSX sheet) listing every FAQ

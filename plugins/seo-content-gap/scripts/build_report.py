@@ -146,6 +146,42 @@ def unique_clusters_by_brand(clusters, order):
     return out
 
 
+def _normh(t):
+    """Normalise a heading for cross-company matching (case/punctuation-blind)."""
+    t = re.sub(r"[^\w\s]", " ", (t or "").lower())
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def heading_coverage(pages, order):
+    """Every H1/H2/H3 heading across all pages -> one row per distinct heading
+    (matched case/punctuation-insensitively within its level), with a yes/no per
+    company. The H1/H2/H3 × company matrix (the 'Term Category Page' Sheet5 view).
+    Returns rows: [{level, text, present:{brand:bool}}]."""
+    pbb = page_by_brand(pages)
+    norm = {}  # brand -> {level: {normtext: original}}
+    for b in order:
+        p = pbb.get(b) or {}
+        d = {1: {}, 2: {}, 3: {}}
+        for h in (p.get("heading_outline") or []):
+            lvl = int(h.get("level", 0) or 0)
+            if lvl in (1, 2, 3):
+                t = (h.get("text") or "").strip()
+                if t:
+                    d[lvl].setdefault(_normh(t), t)
+        norm[b] = d
+    rows, seen = [], set()
+    for lvl in (1, 2, 3):
+        for b in order:
+            for nk, orig in norm[b][lvl].items():
+                if (lvl, nk) in seen:
+                    continue
+                seen.add((lvl, nk))
+                rows.append({"level": lvl, "text": orig,
+                             "present": {bb: (nk in norm[bb][lvl]) for bb in order}})
+    rows.sort(key=lambda r: (r["level"], -sum(1 for v in r["present"].values() if v), r["text"].lower()))
+    return rows
+
+
 def check_brand_keys(clusters, order):
     """Loud per-cluster warnings: a canonical brand that resolves to NO key in a
     cluster that DOES carry brand data — that column would render empty."""
@@ -287,6 +323,9 @@ summary{cursor:pointer;font-weight:600;color:#1e3a8a}small{color:#64748b}code{ba
 .s0 .sh{font-style:italic;color:#64748b;font-weight:600}.s0 .tag{background:#64748b}
 .faq{border-left:3px solid #cbd5e1;padding:2px 0 2px 10px;margin:8px 0}
 .faq .q{font-weight:700;color:#0f172a}.faq .a{color:#334155;font-size:12.5px;margin-top:2px;white-space:pre-wrap}
+.hc td.yes{background:#dcfce7;color:#166534;text-align:center;font-weight:700}
+.hc td.no{background:#fee2e2;color:#b91c1b;text-align:center}
+.hc td:nth-child(-n+3){font-size:12px}.hc th{position:sticky;top:0}
 @media print{details{break-inside:avoid}.cl{break-inside:avoid}.srow{break-inside:avoid}.faq{break-inside:avoid}}
 """
 FILTER_JS = "function f(){var q=(document.getElementById('q').value||'').toLowerCase();var t=document.getElementById('ft').value,p=document.getElementById('fp').value;document.querySelectorAll('#gaps tbody tr').forEach(function(r){var okq=r.innerText.toLowerCase().indexOf(q)>=0;var okt=!t||r.dataset.type===t;var okp=!p||r.dataset.prio===p;r.style.display=(okq&&okt&&okp)?'':'none';});}"
@@ -363,6 +402,7 @@ def build_html(run_dir, meta, clusters, gaps, pages, your, order):
     o.append(f"<small>Your page: <code>{esc(gaps.get('your_url') or meta.get('your_url'))}</code> · type: <b>{esc(gaps.get('page_type') or meta.get('page_type'))}</b> · pages compared: {len(order)}</small>")
     o.append("<div class='toc'><b>Jump to:</b> <a href='#kpi'>Overview</a><a href='#titles'>Titles &amp; H1</a>"
              "<a href='#matrix'>Cluster map</a><a href='#unique'>Unique coverage</a><a href='#coverage'>Coverage per company</a>"
+             "<a href='#headcov'>Heading coverage</a>"
              "<a href='#content'>What each wrote (side-by-side)</a><a href='#struct'>Headings</a>"
              "<a href='#structure'>Page structure</a><a href='#faqs'>FAQs</a>"
              "<a href='#links'>Links</a><a href='#images'>Images</a><a href='#rank'>Ranking view</a>"
@@ -446,6 +486,24 @@ def build_html(run_dir, meta, clusters, gaps, pages, your, order):
         opn = " open" if p.get("is_ours") else ""
         o.append(f"<details{opn}><summary>{esc(b)}{' — OUR PAGE' if p.get('is_ours') else ''} · "
                  f"<small>{esc(p.get('title'))}</small></summary>{body}</details>")
+
+    # heading coverage matrix — H1/H2/H3 x company (Yes/No), Sheet5-style
+    hc_rows = heading_coverage(pages, order)
+    o.append("<h2 id='headcov'>Heading coverage — H1 / H2 / H3 by company</h2>")
+    o.append(f"<small>Every H1/H2/H3 heading across the pages ({len(hc_rows)} distinct). The heading text sits in its level column; <b>Yes</b> = that company's page has this heading (matched case/punctuation-insensitively). Sorted by level, then by how many pages share it.</small>")
+    o.append("<table class='hc'><thead><tr><th>H1</th><th>H2</th><th>H3</th>")
+    for b in order:
+        o.append(f"<th>{esc(b)}</th>")
+    o.append("</tr></thead><tbody>")
+    for r in hc_rows:
+        cols = ["", "", ""]
+        cols[r["level"] - 1] = esc(r["text"])
+        o.append(f"<tr><td>{cols[0]}</td><td>{cols[1]}</td><td>{cols[2]}</td>")
+        for b in order:
+            yes = r["present"].get(b)
+            o.append(f"<td class='{'yes' if yes else 'no'}'>{'Yes' if yes else 'No'}</td>")
+        o.append("</tr>")
+    o.append("</tbody></table>")
 
     # side-by-side: what each wrote, with similarity + deep links
     o.append("<h2 id='content'>What each page actually wrote — side by side</h2>")
@@ -575,6 +633,9 @@ def build_xlsx(run_dir, meta, clusters, gaps, pages, your, order):
     try:
         from openpyxl import Workbook
         from openpyxl.styles import Alignment, Font, PatternFill
+        from openpyxl.chart import BarChart, Reference
+        from openpyxl.formatting.rule import ColorScaleRule, CellIsRule
+        from openpyxl.utils import get_column_letter
     except Exception:
         with open(os.path.join(run_dir, "full_content.csv"), "w", newline="", encoding="utf-8") as fh:
             w = csv.writer(fh); w.writerow(["page", "level", "heading", "words", "text"])
@@ -607,11 +668,37 @@ def build_xlsx(run_dir, meta, clusters, gaps, pages, your, order):
                        ("Quality score", "quality_score"), ("Your words", "your_word_count"),
                        ("Competitor median words", "competitor_median_word_count")]:
         ws.append([label, k.get(key, 0)])
+    ws.column_dimensions["A"].width = 26
+    ws.column_dimensions["B"].width = 14
+
+    # Charts — per-company metric bars (visual, mirrors the HTML charts)
+    cws = sheet("Charts", ["Company", "Words", "Sections", "FAQs", "On-page internal links"])
+    for b in order:
+        p = pbb.get(b) or {}
+        cws.append([b, p.get("word_count_total", 0), len(p.get("sections", []) or []),
+                    len(p.get("faqs", []) or []), len(onpage_internal_links(p))])
+    last = cws.max_row
+    cws.column_dimensions["A"].width = 28
+    if last > 1:
+        for i, (title, col) in enumerate([("Total words", 2), ("Sections", 3),
+                                          ("FAQs", 4), ("On-page internal links", 5)]):
+            ch = BarChart(); ch.type = "bar"; ch.title = title; ch.legend = None
+            ch.height = max(6, last * 0.55); ch.width = 20
+            ch.add_data(Reference(cws, min_col=col, min_row=1, max_row=last), titles_from_data=True)
+            ch.set_categories(Reference(cws, min_col=1, min_row=2, max_row=last))
+            cws.add_chart(ch, "H%d" % (2 + i * 16))
 
     ws = sheet("Cluster Matrix", ["Cluster"] + order)
     for c in clusters.get("clusters", []):
         ws.append([c.get("name")] + [int(brand_entry(c.get("brands"), b).get("depth", 0) or 0) for b in order])
+    ws.column_dimensions["A"].width = 38
     ws.auto_filter.ref = ws.dimensions
+    if ws.max_row > 1 and order:
+        rng = "B2:%s%d" % (get_column_letter(1 + len(order)), ws.max_row)
+        ws.conditional_formatting.add(rng, ColorScaleRule(
+            start_type="num", start_value=0, start_color="F8696B",
+            mid_type="num", mid_value=1.5, mid_color="FFEB84",
+            end_type="num", end_value=3, end_color="63BE7B"))
 
     # Page Titles & H1 — one row per company
     ws = sheet("Page Titles & H1", ["Company", "Title", "H1", "URL"])
@@ -649,6 +736,22 @@ def build_xlsx(run_dir, meta, clusters, gaps, pages, your, order):
     ws.column_dimensions["B"].width = 40
     ws.column_dimensions["E"].width = 60
     ws.auto_filter.ref = ws.dimensions
+
+    # Heading Coverage — H1/H2/H3 x company (Yes/No) matrix, Sheet5-style
+    ws = sheet("Heading Coverage", ["H1", "H2", "H3"] + order)
+    for r in heading_coverage(pages, order):
+        cells = ["", "", ""]
+        cells[r["level"] - 1] = r["text"]
+        ws.append(cells + ["Yes" if r["present"].get(b) else "No" for b in order])
+    for col in ("A", "B", "C"):
+        ws.column_dimensions[col].width = 34
+    ws.auto_filter.ref = ws.dimensions
+    if ws.max_row > 1 and order:
+        rng = "D2:%s%d" % (get_column_letter(3 + len(order)), ws.max_row)
+        ws.conditional_formatting.add(rng, CellIsRule(
+            operator="equal", formula=['"Yes"'], fill=PatternFill("solid", fgColor="DCFCE7")))
+        ws.conditional_formatting.add(rng, CellIsRule(
+            operator="equal", formula=['"No"'], fill=PatternFill("solid", fgColor="FEE2E2")))
 
     # Full Content — every section, every page
     ws = sheet("Full Content", ["Page", "Level", "Heading", "Words", "Text"])
