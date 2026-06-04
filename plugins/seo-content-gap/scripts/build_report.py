@@ -153,32 +153,65 @@ def _normh(t):
 
 
 def heading_coverage(pages, order):
-    """Every H1/H2/H3 heading across all pages -> one row per distinct heading
-    (matched case/punctuation-insensitively within its level), with a yes/no per
-    company. The H1/H2/H3 × company matrix (the 'Term Category Page' Sheet5 view).
-    Returns rows: [{level, text, present:{brand:bool}}]."""
+    """Every H1/H2/H3 heading across all pages, as a NESTED tree in document
+    order: each H1 is followed by its child H2s, each H2 by its child H3s
+    (the 'Term Category Page' hierarchy view). Headings are matched
+    case/punctuation-insensitively within a level. The tree is anchored to the
+    first page (your page) and competitor-unique branches are appended where
+    they nest. Returns rows in depth-first order: [{level, text, present:{brand:bool}}].
+    """
     pbb = page_by_brand(pages)
-    norm = {}  # brand -> {level: {normtext: original}}
+    nodes = {}   # (level, norm) -> node
+    root = []    # top-level H1 nodes, in first-seen order
+
+    def node(level, nk, text):
+        k = (level, nk)
+        n = nodes.get(k)
+        if n is None:
+            n = {"level": level, "text": text, "present": set(),
+                 "children": [], "attached": False}
+            nodes[k] = n
+        return n
+
     for b in order:
         p = pbb.get(b) or {}
-        d = {1: {}, 2: {}, 3: {}}
+        cur1 = cur2 = None  # keys of the current H1 / H2 while walking this page
         for h in (p.get("heading_outline") or []):
             lvl = int(h.get("level", 0) or 0)
-            if lvl in (1, 2, 3):
-                t = (h.get("text") or "").strip()
-                if t:
-                    d[lvl].setdefault(_normh(t), t)
-        norm[b] = d
-    rows, seen = [], set()
-    for lvl in (1, 2, 3):
-        for b in order:
-            for nk, orig in norm[b][lvl].items():
-                if (lvl, nk) in seen:
-                    continue
-                seen.add((lvl, nk))
-                rows.append({"level": lvl, "text": orig,
-                             "present": {bb: (nk in norm[bb][lvl]) for bb in order}})
-    rows.sort(key=lambda r: (r["level"], -sum(1 for v in r["present"].values() if v), r["text"].lower()))
+            if lvl not in (1, 2, 3):
+                continue
+            t = (h.get("text") or "").strip()
+            if not t:
+                continue
+            nk = _normh(t)
+            n = node(lvl, nk, t)
+            n["present"].add(b)
+            if not n["attached"]:
+                n["attached"] = True
+                parent = None
+                if lvl == 2:
+                    parent = cur1
+                elif lvl == 3:
+                    parent = cur2 or cur1
+                if parent is not None and parent in nodes:
+                    nodes[parent]["children"].append(n)
+                else:
+                    root.append(n)
+            if lvl == 1:
+                cur1, cur2 = (1, nk), None
+            elif lvl == 2:
+                cur2 = (2, nk)
+
+    rows = []
+
+    def dfs(n):
+        rows.append({"level": n["level"], "text": n["text"],
+                     "present": {b: (b in n["present"]) for b in order}})
+        for ch in n["children"]:
+            dfs(ch)
+
+    for n in root:
+        dfs(n)
     return rows
 
 
@@ -490,7 +523,7 @@ def build_html(run_dir, meta, clusters, gaps, pages, your, order):
     # heading coverage matrix — H1/H2/H3 x company (Yes/No), Sheet5-style
     hc_rows = heading_coverage(pages, order)
     o.append("<h2 id='headcov'>Heading coverage — H1 / H2 / H3 by company</h2>")
-    o.append(f"<small>Every H1/H2/H3 heading across the pages ({len(hc_rows)} distinct). The heading text sits in its level column; <b>Yes</b> = that company's page has this heading (matched case/punctuation-insensitively). Sorted by level, then by how many pages share it.</small>")
+    o.append(f"<small>Every H1/H2/H3 heading across the pages ({len(hc_rows)} distinct), in <b>hierarchy order</b> — each H1 is followed by its H2s, each H2 by its H3s. The heading text sits in its level column; <b>Yes</b> = that company's page has this heading (matched case/punctuation-insensitively).</small>")
     o.append("<table class='hc'><thead><tr><th>H1</th><th>H2</th><th>H3</th>")
     for b in order:
         o.append(f"<th>{esc(b)}</th>")

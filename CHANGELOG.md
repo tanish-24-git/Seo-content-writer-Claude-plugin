@@ -3,6 +3,13 @@
 All notable changes to the SEO Content-Gap plugin are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.3] — 2026-06-04
+### Changed
+- **Heading Coverage is now hierarchical** (HTML + XLSX): rows follow document order —
+  each **H1 → its child H2s → their child H3s** — instead of the flat "all H1s, then all
+  H2s" layout. The tree is anchored to your page's structure, and competitor-unique
+  branches are appended where they nest. Same `H1 | H2 | H3 | companies` Yes/No columns.
+
 ## [0.4.2] — 2026-06-04
 ### Added
 - **Heading Coverage matrix** — H1/H2/H3 × company **Yes/No** table (HTML) + **Heading Coverage**
