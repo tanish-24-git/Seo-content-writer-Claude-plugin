@@ -3,6 +3,26 @@
 All notable changes to the SEO Content-Gap plugin are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] — 2026-06-07
+### Added — heading-markup gap detection (covered, but not in an H-tag)
+- **Pseudo-heading extraction** (`extract_page.py`): detects topics the page renders as section
+  titles but ships in a non-heading tag (`<p>/<div>/<span>`, styled `*title`/`*head*` class, or
+  `role="heading"`) — invisible to crawlers/AI bots as headings. Generic interactive-widget classes
+  (calculator radios, popups, sticky bars, sliders, testimonial cards, tabs) are denied so only real
+  editorial topics survive. New fields: `pseudo_headings[]` (tag, class, text, parent_heading,
+  parent_level, seq) and `pseudo_heading_count`; `heading_outline[]` now carries a `seq` for true
+  document-order interleaving.
+- **Heading Coverage → "Covered on the page but NOT in any H1/H2/H3 tag"** (HTML + new **Heading
+  Markup Gaps** XLSX sheet): per-company table of each untagged topic, its current tag, the heading
+  it sits under, and the suggested promotion (H2/H3).
+- **Cluster coverage map → "Missing from header tags"**: your page's topics that carry no H-tag and
+  therefore never register in the cluster map.
+- **New "Recommended structure fix" section** (HTML + new **Structure Fix** XLSX sheet), below Gaps:
+  a crawler's-eye view of your page — structural issues (flat outline, multiple/zero H1, untagged
+  topics), title/H1 recommendations, a promote-to-heading list, and the **corrected reading order**
+  (real headings + untagged topics interleaved in document order, each flagged with the tag it should
+  become). Enriched with query-aware notes when the gap-analyst supplies `structure_fix`.
+
 ## [0.4.3] — 2026-06-04
 ### Changed
 - **Heading Coverage is now hierarchical** (HTML + XLSX): rows follow document order —

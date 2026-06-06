@@ -11,7 +11,9 @@ competitor-*.json) and produces:
                  external-brand mentions. Every section deep-links to the live
                  page (Chrome text-fragment) and has an in-report anchor.
   report.xlsx  — every piece of content in filterable sheets: Full Content,
-                 Section Comparison, Similarity, H1/H2/H3, Internal/External
+                 Section Comparison, Similarity, H1/H2/H3, Heading Coverage,
+                 Heading Markup Gaps (topics covered but not in any H-tag),
+                 Structure Fix (issues + corrected reading order), Internal/External
                  Links, Images, Ranking, External Brands, Gaps, FAQ, Quality.
                  (CSV fallback if openpyxl is missing.)
 
@@ -213,6 +215,75 @@ def heading_coverage(pages, order):
     for n in root:
         dfs(n)
     return rows
+
+
+def covered_not_in_headings(page):
+    """Pseudo-headings on this page whose text is NOT any real H1/H2/H3 — topics
+    the page presents as section titles but ships inside <p>/<div>/<span> (or a
+    styled class), so a crawler / AI bot never registers them as headings.
+    Returns rows in document order with a suggested heading level."""
+    real = set()
+    for h in (page.get("heading_outline") or []):
+        if int(h.get("level", 0) or 0) in (1, 2, 3):
+            real.add(_normh(h.get("text")))
+    seen, out = set(), []
+    for ph in (page.get("pseudo_headings") or []):
+        t = (ph.get("text") or "").strip()
+        nk = _normh(t)
+        if not nk or nk in real or nk in seen:
+            continue
+        seen.add(nk)
+        pl = int(ph.get("parent_level", 0) or 0)
+        out.append({"text": t, "tag": ph.get("tag") or "p",
+                    "class": (ph.get("class") or "").split()[0] if ph.get("class") else "",
+                    "parent_heading": ph.get("parent_heading") or "",
+                    "parent_level": pl, "seq": int(ph.get("seq", 0) or 0),
+                    "suggested": "H3" if pl >= 2 else "H2"})
+    return out
+
+
+def merged_outline(page):
+    """The page's real headings + its not-in-heading topics, interleaved in true
+    document order (by seq). Real headings carry their current tag; pseudo rows
+    are flagged with the tag they SHOULD become. This is the 'corrected reading
+    order' a crawler should see."""
+    rows = []
+    for h in (page.get("heading_outline") or []):
+        lvl = int(h.get("level", 0) or 0)
+        if lvl in (1, 2, 3):
+            rows.append({"seq": int(h.get("seq", 0) or 0), "kind": "real",
+                         "tag": "H%d" % lvl, "level": lvl, "text": h.get("text") or ""})
+    for r in covered_not_in_headings(page):
+        rows.append({"seq": r["seq"], "kind": "pseudo",
+                     "tag": "<%s>" % r["tag"], "level": int(r["suggested"][1]),
+                     "text": r["text"], "suggested": r["suggested"]})
+    rows.sort(key=lambda x: x["seq"])
+    return rows
+
+
+def structure_problems(page):
+    """Deterministic structural problems for a page, from a crawler's view.
+    Returns [(area, problem)]. Used as the baseline for the structure-fix section
+    (the analyst may add richer, query-aware notes via gaps['structure_fix'])."""
+    hc = page.get("heading_counts", {}) or {}
+    h1, h2, h3 = hc.get("h1", 0), hc.get("h2", 0), hc.get("h3", 0)
+    title = (page.get("title") or "").strip()
+    out = []
+    if h1 == 0:
+        out.append(("H1", "No &lt;h1&gt; on the page — add exactly one H1 naming the primary topic."))
+    elif h1 > 1:
+        out.append(("H1", f"{h1} &lt;h1&gt; tags — keep exactly one; demote the extra(s) to H2."))
+    if not title:
+        out.append(("Title", "No &lt;title&gt; tag detected — add a concise, keyword-led title."))
+    if h2 and h3 == 0:
+        out.append(("Hierarchy", f"Flat outline — {h2} H2s and zero H3s. Sub-topics aren't nested; "
+                                  "group detail points under their parent H2 as H3."))
+    nh = covered_not_in_headings(page)
+    if nh:
+        out.append(("Heading markup", f"{len(nh)} topic(s) are styled as titles but use "
+                    "&lt;p&gt;/&lt;div&gt;/&lt;span&gt;, not heading tags — invisible to crawlers "
+                    "as headings (see promote list below)."))
+    return out
 
 
 def check_brand_keys(clusters, order):
@@ -439,7 +510,7 @@ def build_html(run_dir, meta, clusters, gaps, pages, your, order):
              "<a href='#content'>What each wrote (side-by-side)</a><a href='#struct'>Headings</a>"
              "<a href='#structure'>Page structure</a><a href='#faqs'>FAQs</a>"
              "<a href='#links'>Links</a><a href='#images'>Images</a><a href='#rank'>Ranking view</a>"
-             "<a href='#gaps'>Gaps</a></div>")
+             "<a href='#gaps'>Gaps</a><a href='#structfix'>Structure fix</a></div>")
 
     yr = serp.get("your_rank")
     o.append(f"<div class='banner ok'>✅ Your page ranks <b>#{esc(yr)}</b> for \"{esc(serp.get('query'))}\".</div>"
@@ -483,6 +554,22 @@ def build_html(run_dir, meta, clusters, gaps, pages, your, order):
             o.append(f"<td class='d{d}'>{d}</td>")
         o.append("</tr>")
     o.append("</tbody></table>")
+
+    # missing from header tags — present on YOUR page, but no H1/H2/H3
+    nh_your = covered_not_in_headings(pbb.get(your, {}) or {})
+    o.append("<h3>Missing from header tags — on the page, but no H-tag</h3>")
+    o.append("<small>Topics your page actually covers (rendered as styled titles) that carry "
+             "<b>no</b> H1/H2/H3 tag, so they never register as headings during crawl. The cluster "
+             "map above only counts real headings — these topics are invisible to it. Full "
+             "per-company list under <a href='#headcov'>Heading coverage</a>.</small>")
+    if nh_your:
+        o.append("<ul>" + "".join(
+            f"<li>{esc(r['text'])} <small>— currently &lt;{esc(r['tag'])}&gt;, suggest "
+            f"<b>{r['suggested']}</b></small></li>" for r in nh_your[:40]) + "</ul>")
+        if len(nh_your) > 40:
+            o.append(f"<small>… and {len(nh_your)-40} more — see <a href='#headcov'>Heading coverage</a>.</small>")
+    else:
+        o.append("<small>none detected — every styled topic on your page is a real heading ✅</small>")
 
     # unique coverage — topics only ONE page covers
     uniq = unique_clusters_by_brand(clusters, order)
@@ -537,6 +624,37 @@ def build_html(run_dir, meta, clusters, gaps, pages, your, order):
             o.append(f"<td class='{'yes' if yes else 'no'}'>{'Yes' if yes else 'No'}</td>")
         o.append("</tr>")
     o.append("</tbody></table>")
+
+    # NEW: covered on the page but NOT in any heading tag (pseudo-headings)
+    o.append("<h3>Covered on the page but NOT in any H1 / H2 / H3 tag</h3>")
+    o.append("<small>Topics each page presents as a section title but ships inside a "
+             "<code>&lt;p&gt; / &lt;div&gt; / &lt;span&gt;</code> (or a styled class) instead of a "
+             "real heading tag — so a crawler / AI bot never sees them as headings. Promote each to "
+             "the suggested tag. <b>Sits under</b> = the nearest real heading above it on the page.</small>")
+    for b in order:
+        p = pbb.get(b)
+        if not p:
+            continue
+        rows = covered_not_in_headings(p)
+        if not rows and not p.get("is_ours"):
+            continue  # always show OUR page, even when clean
+        opn = " open" if p.get("is_ours") else ""
+        if rows:
+            body = ("<table><thead><tr><th>Topic (styled as a heading)</th><th>Current tag</th>"
+                    "<th>Sits under</th><th>Suggested fix</th></tr></thead><tbody>"
+                    + "".join(
+                        f"<tr><td>{esc(r['text'])}</td>"
+                        f"<td class='mono'>&lt;{esc(r['tag'])}&gt;"
+                        f"{(' .'+esc(r['class'])) if r['class'] else ''}</td>"
+                        f"<td>{esc(r['parent_heading'])}</td>"
+                        f"<td><b>promote to {r['suggested']}</b></td></tr>"
+                        for r in rows[:200]) + "</tbody></table>")
+            if len(rows) > 200:
+                body += f"<small>… {len(rows)-200} more (see report.xlsx → ‘Covered Not In Headings’).</small>"
+        else:
+            body = "<small>none — every styled topic title on this page is a real heading tag ✅</small>"
+        o.append(f"<details{opn}><summary>{esc(b)}{' — OUR PAGE' if p.get('is_ours') else ''} · "
+                 f"{len(rows)} topic(s) not in heading tags</summary>{body}</details>")
 
     # side-by-side: what each wrote, with similarity + deep links
     o.append("<h2 id='content'>What each page actually wrote — side by side</h2>")
@@ -652,6 +770,80 @@ def build_html(run_dir, meta, clusters, gaps, pages, your, order):
         o.append(f"<tr data-type='{esc(g.get('type'))}' data-prio='{pr}'><td class='p{pr}'>P{pr}</td><td>{esc(g.get('type'))}</td><td>{esc(g.get('cluster'))}</td>"
                  f"<td><b>{esc(g.get('title'))}</b><br><small>{esc(g.get('recommendation') or g.get('detail'))}</small></td><td>{esc(g.get('exemplar_brand'))}</td></tr>")
     o.append("</tbody></table>")
+
+    # NEW: recommended structure fix — how a crawler / AI bot reads YOUR page,
+    # and how to re-order / re-tag it. Prefers the analyst's query-aware notes
+    # (gaps['structure_fix']); always backed by the deterministic baseline.
+    ourp = pbb.get(your, {}) or {}
+    sf = gaps.get("structure_fix") or {}
+    o.append("<h2 id='structfix'>Recommended structure fix — how a crawler reads this page</h2>")
+    o.append("<small>What a Google / AI crawl bot sees when it parses your page for the target query, "
+             "and the structural changes that make the answer easier to find: which topics to promote "
+             "to real headings, what the title / H1 should say, and the corrected reading order "
+             "(what should sit higher, what lower). Based on your page: "
+             f"<code>{esc(ourp.get('url') or '')}</code>.</small>")
+
+    # problems (deterministic baseline + any analyst-supplied notes)
+    probs = structure_problems(ourp)
+    extra = sf.get("problems") or []
+    o.append("<h3>What a crawler sees today — issues</h3>")
+    if probs or extra:
+        o.append("<ul>")
+        for area, msg in probs:
+            o.append(f"<li><b>{esc(area)}:</b> {msg}</li>")
+        for m in extra:
+            o.append(f"<li>{esc(m)}</li>")
+        o.append("</ul>")
+    else:
+        o.append("<small>no structural issues detected ✅</small>")
+
+    # title / H1 recommendation
+    tr, hr1 = sf.get("title_recommendation"), sf.get("h1_recommendation")
+    o.append("<table><thead><tr><th>Element</th><th>Currently on page</th><th>Recommendation</th></tr></thead><tbody>")
+    o.append(f"<tr><td><b>&lt;title&gt;</b></td><td>{esc(ourp.get('title'))}</td>"
+             f"<td>{esc(tr) if tr else '<small>keep — or tighten to lead with the target query</small>'}</td></tr>")
+    o.append(f"<tr><td><b>H1</b></td><td>{esc(ourp.get('h1'))}</td>"
+             f"<td>{esc(hr1) if hr1 else '<small>keep — exactly one H1 stating the primary topic</small>'}</td></tr>")
+    o.append("</tbody></table>")
+
+    # promote-to-heading list (the topics with no H-tag)
+    promote = covered_not_in_headings(ourp)
+    o.append("<h3>Promote these topics to real headings</h3>")
+    if promote:
+        o.append("<small>Each is on the page but in a non-heading tag. Promoting makes it a crawlable "
+                 "section heading (and FAQ/section-snippet eligible).</small>")
+        o.append("<table><thead><tr><th>Topic</th><th>Now</th><th>Sits under</th><th>Make it</th></tr></thead><tbody>")
+        for r in promote[:80]:
+            o.append(f"<tr><td>{esc(r['text'])}</td><td class='mono'>&lt;{esc(r['tag'])}&gt;</td>"
+                     f"<td>{esc(r['parent_heading'])}</td><td><b>{r['suggested']}</b></td></tr>")
+        o.append("</tbody></table>")
+        if len(promote) > 80:
+            o.append(f"<small>… {len(promote)-80} more in report.xlsx.</small>")
+    else:
+        o.append("<small>nothing to promote — all topics already use heading tags ✅</small>")
+
+    # corrected reading order — real headings + promoted topics, in document order
+    mo = merged_outline(ourp)
+    o.append("<h3>Corrected reading order for crawlers</h3>")
+    o.append("<small>Your page in document order with the missing topics slotted in where they "
+             "physically appear — real headings shown with their tag, topics-to-promote flagged "
+             "<span class='p2'>(promote)</span>. Use it to see what should sit higher vs lower and "
+             "where each untagged topic belongs in the hierarchy.</small>")
+    if mo:
+        o.append("<div class='struct'>")
+        for r in mo[:400]:
+            lvl = int(r.get("level", 2) or 2)
+            cls = "s%d" % (lvl if 1 <= lvl <= 4 else 4)
+            flag = (f" <span class='p2'>(promote &lt;{esc(r['tag'])}&gt; → {r['suggested']})</span>"
+                    if r["kind"] == "pseudo" else "")
+            tag = esc(r["tag"]) if r["kind"] == "real" else r["suggested"]
+            o.append(f"<div class='srow {cls}'><span class='tag'>{tag}</span>"
+                     f"<span class='sh'>{esc(r['text'])}</span>{flag}</div>")
+        o.append("</div>")
+    else:
+        o.append("<small>no outline captured for this page</small>")
+    if sf.get("notes"):
+        o.append(f"<p><small><b>Analyst note:</b> {esc(sf.get('notes'))}</small></p>")
 
     o.append("<hr><small>SEO Content-Gap Analyzer — identifies gaps & shows real competitor content for reference. Not publishable copy. Links/headings/images parsed from live HTML; verify before publishing.</small>")
     o.append(f"<script>{FILTER_JS}{PRINT_JS}</script></body></html>")
@@ -785,6 +977,39 @@ def build_xlsx(run_dir, meta, clusters, gaps, pages, your, order):
             operator="equal", formula=['"Yes"'], fill=PatternFill("solid", fgColor="DCFCE7")))
         ws.conditional_formatting.add(rng, CellIsRule(
             operator="equal", formula=['"No"'], fill=PatternFill("solid", fgColor="FEE2E2")))
+
+    # Heading Markup Gaps — topics covered on each page but NOT in any H1/H2/H3
+    ws = sheet("Heading Markup Gaps", ["Page", "Topic (styled as heading)", "Current tag", "Class", "Sits under", "Suggested"])
+    for b in order:
+        p = pbb.get(b)
+        if not p:
+            continue
+        for r in covered_not_in_headings(p):
+            ws.append([b, r["text"], "<%s>" % r["tag"], r["class"], r["parent_heading"], r["suggested"]])
+    ws.column_dimensions["B"].width = 50
+    ws.column_dimensions["E"].width = 36
+    ws.auto_filter.ref = ws.dimensions
+
+    # Structure Fix — issues + corrected reading order for OUR page
+    ws = sheet("Structure Fix", ["Section", "Order", "Tag / Make", "Kind", "Detail"])
+    ourp = pbb.get(your, {}) or {}
+    for area, msg in structure_problems(ourp):
+        ws.append(["ISSUE", "", area, "", re.sub(r"&[a-z]+;", "", msg)])
+    tr, hr1 = (gaps.get("structure_fix") or {}).get("title_recommendation"), (gaps.get("structure_fix") or {}).get("h1_recommendation")
+    ws.append(["TITLE", "", "<title>", "current", ourp.get("title")])
+    if tr:
+        ws.append(["TITLE", "", "<title>", "recommend", tr])
+    ws.append(["H1", "", "H1", "current", ourp.get("h1")])
+    if hr1:
+        ws.append(["H1", "", "H1", "recommend", hr1])
+    for r in merged_outline(ourp):
+        tagcol = r["tag"] if r["kind"] == "real" else "%s → %s" % (r["tag"], r["suggested"])
+        ws.append(["OUTLINE", r["seq"], tagcol, r["kind"], r["text"]])
+    ws.column_dimensions["C"].width = 18
+    ws.column_dimensions["E"].width = 70
+    for row in ws.iter_rows(min_row=2, min_col=5, max_col=5):
+        row[0].alignment = wrap
+    ws.auto_filter.ref = ws.dimensions
 
     # Full Content — every section, every page
     ws = sheet("Full Content", ["Page", "Level", "Heading", "Words", "Text"])

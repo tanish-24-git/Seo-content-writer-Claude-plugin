@@ -25,7 +25,8 @@ internal/external)**, tables, JSON-LD schema types, images/alt, and word count:
 python "${CLAUDE_PLUGIN_ROOT}/scripts/extract_page.py" "<url>" "<out_path>"
 ```
 (try `python`, then `python3`). Then **Read `<out_path>`** — that JSON now holds the accurate
-structural fields. These are the source of truth for `heading_counts`, `heading_outline`, **`sections` (each
+structural fields. These are the source of truth for `heading_counts`, `heading_outline`, **`pseudo_headings`
+(topics styled as titles but in non-heading tags — keep verbatim)**, **`sections` (each
 heading with its actual body text)**, `internal_links`, `external_links`, **`images` (src + alt)**,
 `internal_link_count`, `unique_internal_targets`, `external_link_count`, `tables_count`,
 `schema_types`, `word_count_total`, `image_count`. Keep the `sections` text — the report shows
@@ -49,7 +50,8 @@ published/modified **dates**, and a `readability_note`. Map sections to the head
 Merge Step 1 (structure/links — keep verbatim) + Step 2 (semantics) into the schema at
 `${CLAUDE_PLUGIN_ROOT}/skills/seo-content-gap/reference/block-schema.json` and overwrite
 `out_path` with the complete object. Set `brand`, `is_ours`, `page_type`. Do not drop the
-internal_links list — the report needs the real anchors and targets.
+internal_links list or `pseudo_headings` — the report needs the real anchors/targets and the
+not-in-an-H-tag topics.
 
 ## Rules
 - **Links and headings are facts** — take them from `extract_page.py`, never estimate.

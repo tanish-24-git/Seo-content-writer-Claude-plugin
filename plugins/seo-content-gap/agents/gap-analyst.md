@@ -72,6 +72,20 @@ For each page, using the extracted content + quality signals, add:
 - **external_brands**: list any external brands / companies / third parties **named in the page's
   content** (competitor names, partners, rating agencies, regulators, tools). Empty list if none.
 
+## Step 6 — Structure fix for OUR page (crawler / AI-bot view)
+Each page JSON now carries `pseudo_headings` — text the page renders as a section title but ships
+in a non-heading tag (`<p>/<div>/<span>`), with its `parent_heading` and document `seq`. These are
+"covered but not in any H-tag" topics; the report already lists and interleaves them deterministically.
+Your job is to add the **query-aware** layer a script can't: emit `structure_fix` for OUR page with
+- `problems`: short, specific structural issues a Google/AI crawler hits for the **target query**
+  (e.g. "the answer to '<query>' sits 1,800 words down, below 6 promotional sections").
+- `title_recommendation` / `h1_recommendation`: a tighter title/H1 if the current one buries the query
+  (omit or leave "" to keep the current one).
+- `notes`: one or two sentences on what should move **up** vs **down** so the primary answer is near the
+  top and the heading hierarchy reads cleanly.
+Never restate the deterministic promote-list verbatim; add judgement the script lacks. Omit the whole
+object if the page is already well-structured.
+
 ## Output — write TWO files into `run_dir`
 In every example below, the keys shown in ALL-CAPS angle brackets are **placeholders** — replace
 them with the exact canonical strings from `meta.json` (Step 0). `<YOUR_BRAND>` = `meta.your_brand`;
@@ -101,7 +115,8 @@ competitor), each keyed by its canonical brand.
   "quality": {"per_brand": {"<YOUR_BRAND>": {"word_count": 0, "h2": 0, "faqs": 0,
                "internal_links": 0, "schema": [""], "eeat": false, "freshness": ""}}},
   "ranking_assessment": {"<YOUR_BRAND>": {"google": "", "ai_search": ""}},
-  "external_brands": {"<YOUR_BRAND>": [""]}
+  "external_brands": {"<YOUR_BRAND>": [""]},
+  "structure_fix": {"problems": [""], "title_recommendation": "", "h1_recommendation": "", "notes": ""}
 }
 ```
 (`your_brand` and each `competitors[]` value above are also copied verbatim from `meta.json`.)

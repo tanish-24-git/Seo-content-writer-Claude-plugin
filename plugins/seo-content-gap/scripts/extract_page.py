@@ -31,6 +31,21 @@ SKIP = {"script", "style", "noscript", "svg", "template",
 HEADINGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
 CHROME = {"nav", "footer", "header", "aside"}
 SEC_CAP = 6000  # max chars of body text kept per section
+# A non-heading element whose class reads like a heading (…title/…head/heading/
+# subhead/…header) OR carries role="heading" is a PSEUDO-heading: humans read it
+# as a section title, but a crawler/AI bot never sees it as a heading. These are
+# exactly the "covered on the page but not in any H-tag" topics.
+CANDIDATE_TAGS = {"p", "div", "span", "strong", "b", "li", "dt", "dd"}
+_PSEUDO_CLASS_RE = re.compile(r"(?:title|head)", re.I)
+# Generic interactive-widget / chrome class tokens (NOT real editorial topics):
+# calculator radios, popups, sticky bars, sliders, testimonial cards, etc. Kept
+# client-agnostic on purpose — match by widget role, never by a brand's classnames.
+_PSEUDO_DENY_RE = re.compile(
+    r"(?:popup|modal|dialog|dropdown|stick|slider|tooltip|toggle|radio|checkbox|"
+    r"progress|thanks|cookie|login|signup|\botp\b|captcha|breadcrumb|pagination|"
+    r"testimonial|rating|eyebrow|smalltitle|small_bold|banner|carousel|tabs?[-_]|"
+    r"\btab\b)", re.I)
+PSEUDO_MIN, PSEUDO_MAX = 3, 120  # plausible heading-text length window
 # Long runs of phone country codes ("+91 +1 (USA) +1 (CAN) ...") leak in from
 # custom (non-<select>) phone widgets; 4+ consecutive "+code" tokens = a picker.
 _PHONE_CODE_RUN = re.compile(r'(?:\+\d{1,4}(?:\s*\([^)]{1,8}\))?\s*){4,}')
@@ -62,6 +77,8 @@ class PageParser(HTMLParser):
         self.schema_types = []
         self.words = 0
         self.sections = []                 # [{level, heading, text}]
+        self.pseudo = []                   # [{tag, class, text, parent_heading, parent_level, seq}]
+        self._seq = 0                      # document-order counter (real + pseudo headings)
         # state
         self._skip = 0
         self._chrome = {k: 0 for k in CHROME}
@@ -75,6 +92,11 @@ class PageParser(HTMLParser):
         self._sec_level = 0
         self._sec_heading = "(intro)"
         self._sec_buf = []
+        # pseudo-heading capture
+        self._ps = None        # active frame {tag, class, parent_heading, parent_level} or None
+        self._ps_buf = []
+        self._ps_depth = 0
+        self._ps_seen = set()  # normalised texts already recorded (dedupe)
 
     def _scope(self):
         for k in ("nav", "footer", "header", "aside"):
@@ -126,6 +148,23 @@ class PageParser(HTMLParser):
         elif tag == "table":
             self.tables += 1
 
+        # Pseudo-heading capture — a non-heading element styled like a heading,
+        # in-content only and never while inside a real heading. Balance nested
+        # same-name tags so the close fires on the right element.
+        if (self._skip == 0 and self._h_level == 0 and self._ps is None
+                and tag in CANDIDATE_TAGS and self._scope() == "in-content"):
+            cls = (a.get("class") or "").strip()
+            role = (a.get("role") or "").lower()
+            looks_head = (cls and _PSEUDO_CLASS_RE.search(cls)) or role == "heading"
+            if looks_head and not (cls and _PSEUDO_DENY_RE.search(cls)):
+                self._ps = {"tag": tag, "class": cls,
+                            "parent_heading": self._sec_heading,
+                            "parent_level": self._sec_level}
+                self._ps_buf = []
+                self._ps_depth = 1
+        elif self._ps is not None and tag == self._ps["tag"]:
+            self._ps_depth += 1
+
     def handle_endtag(self, tag):
         if tag in SKIP:
             if tag == "script" and self._ldjson > 0:
@@ -142,7 +181,8 @@ class PageParser(HTMLParser):
             text = re.sub(r"\s+", " ", "".join(self._h_buf)).strip()
             if text:
                 lvl = self._h_level
-                self.outline.append({"level": lvl, "text": text})
+                self.outline.append({"level": lvl, "text": text, "seq": self._seq})
+                self._seq += 1
                 if lvl == 1:
                     self.heading_counts["h1"] += 1
                     if not self.h1:
@@ -168,12 +208,36 @@ class PageParser(HTMLParser):
                                    "scope": self._scope(), "internal": internal})
             self._a_href = None
 
+        # Close an active pseudo-heading on its matching tag.
+        if self._ps is not None and tag == self._ps["tag"]:
+            self._ps_depth -= 1
+            if self._ps_depth <= 0:
+                text = re.sub(r"\s+", " ", "".join(self._ps_buf)).strip()
+                text = _PHONE_CODE_RUN.sub(" ", text)
+                text = _INCOME_BAND_RUN.sub(" ", text)
+                text = re.sub(r"\s{2,}", " ", text).strip()
+                nk = re.sub(r"[^\w\s]", " ", text.lower())
+                nk = re.sub(r"\s+", " ", nk).strip()
+                if (PSEUDO_MIN <= len(text) <= PSEUDO_MAX and nk
+                        and not text.replace(" ", "").isdigit()
+                        and nk not in self._ps_seen and len(self.pseudo) < 400):
+                    self._ps_seen.add(nk)
+                    self.pseudo.append({
+                        "tag": self._ps["tag"], "class": self._ps["class"],
+                        "text": text, "parent_heading": self._ps["parent_heading"],
+                        "parent_level": self._ps["parent_level"], "seq": self._seq})
+                    self._seq += 1
+                self._ps = None
+                self._ps_buf = []
+
     def handle_data(self, data):
         if self._ldjson > 0:
             self._ld_buf.append(data)
             return
         if self._skip > 0:
             return
+        if self._ps is not None:
+            self._ps_buf.append(data)
         if self._in_title and not self.title:
             self.title = re.sub(r"\s+", " ", data).strip()
         if self._h_level:
@@ -230,6 +294,8 @@ def main():
     data = {
         "url": final_url, "title": p.title, "meta_description": p.meta_desc, "h1": p.h1,
         "heading_counts": p.heading_counts, "heading_outline": p.outline[:250],
+        "pseudo_headings": p.pseudo[:400],
+        "pseudo_heading_count": len(p.pseudo),
         "sections": p.sections[:120],
         "internal_link_count": len(internal),
         "unique_internal_targets": len({l["href"] for l in internal}),
@@ -248,6 +314,7 @@ def main():
     }
     json.dump(data, open(out, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
     print(f"OK {final_url} :: H1={p.heading_counts['h1']} H2={p.heading_counts['h2']} "
+          f"pseudo={len(p.pseudo)} "
           f"sections={len(p.sections)} links={len(internal)}int/{len(external)}ext "
           f"images={len(p.images_list)} words={p.words}")
 
