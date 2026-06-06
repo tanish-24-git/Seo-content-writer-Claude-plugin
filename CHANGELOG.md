@@ -3,6 +3,25 @@
 All notable changes to the SEO Content-Gap plugin are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] — 2026-06-07
+### Added — Content Coverage + FAQ Coverage (header-blind, semantically matched)
+- **New "Content coverage — every topic, by company" section** (HTML + new **Content Coverage**
+  XLSX sheet, with green/red Yes-No conditional formatting): a flat topic × company Yes/No matrix
+  that mirrors Heading Coverage's structure but is **header-blind** — it asks "is the topic present
+  at all (in a heading OR in body copy)?" rather than "is it an H-tag?". Driven by the gap-analyst's
+  block-to-block clustering, so a topic everyone covers but writes up in their own words still reads
+  `Yes`. Complements Heading Coverage (markup view) and the depth-scored Cluster coverage map.
+- **New "FAQ coverage — each question, by company" table** (HTML + new **FAQ Coverage** XLSX sheet):
+  a question × company Yes/No matrix over every distinct FAQ. Differently-worded questions about the
+  same thing are **grouped by content-token overlap** (Jaccard ≥ 0.5, stop-words stripped) so e.g.
+  "Is a medical test required?" and "Do I need a medical test for term insurance?" collapse to one
+  row. Ranked most-covered first; rows where your column is `No` while others are `Yes` are your FAQ
+  gaps at a glance. Prefers an optional semantic `gaps['faq_coverage']` from the gap-analyst; falls
+  back to deterministic clustering of the raw page FAQs.
+- CSV fallback (no openpyxl) now also writes `content_coverage.csv` and `faq_coverage.csv`.
+- `gap-analyst` may optionally emit `faq_coverage` (canonical question list with per-brand Yes/No or
+  `answered_by`) for higher-accuracy semantic FAQ matching; a deterministic fallback always renders.
+
 ## [0.5.0] — 2026-06-07
 ### Added — heading-markup gap detection (covered, but not in an H-tag)
 - **Pseudo-heading extraction** (`extract_page.py`): detects topics the page renders as section

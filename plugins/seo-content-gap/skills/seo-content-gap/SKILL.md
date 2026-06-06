@@ -75,9 +75,11 @@ Show the user, in chat:
   with the **content-similarity** note (near-duplicate / reworded / distinct).
 - The **top 5 prioritised gaps** as one-liners.
 - Where the files are: `report.html` (rich: side-by-side content, similarity, ranking view,
-  per-page H1/H2/H3 + link + image lists, clickable section deep-links; open → Print → Save as
-  PDF), `report.xlsx` (Full Content + Section Comparison + separate H1/H2/H3 + Links + Images +
-  Ranking + External Brands sheets), `report.md`.
+  Heading coverage + **Content coverage** (header-blind topic Yes/No) + **FAQ coverage** Yes/No
+  matrices, per-page H1/H2/H3 + link + image lists, clickable section deep-links; open → Print →
+  Save as PDF), `report.xlsx` (Full Content + Section Comparison + separate H1/H2/H3 + Heading
+  Coverage + **Content Coverage** + **FAQ Coverage** + Links + Images + Ranking + External Brands
+  sheets), `report.md`.
 - A one-line reminder they can now **chat** to dig in.
 
 ## Stage 6 — Conversational session (stay open)

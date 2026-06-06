@@ -12,6 +12,7 @@ competitor-*.json) and produces:
                  page (Chrome text-fragment) and has an in-report anchor.
   report.xlsx  — every piece of content in filterable sheets: Full Content,
                  Section Comparison, Similarity, H1/H2/H3, Heading Coverage,
+                 Content Coverage, FAQ Coverage,
                  Heading Markup Gaps (topics covered but not in any H-tag),
                  Structure Fix (issues + corrected reading order), Internal/External
                  Links, Images, Ranking, External Brands, Gaps, FAQ, Quality.
@@ -240,6 +241,100 @@ def covered_not_in_headings(page):
                     "parent_level": pl, "seq": int(ph.get("seq", 0) or 0),
                     "suggested": "H3" if pl >= 2 else "H2"})
     return out
+
+
+def content_coverage(clusters, order):
+    """Every topic cluster across the pages as a flat Yes/No matrix: does each
+    company cover this topic ANYWHERE on the page — in a heading OR in body copy,
+    even if it is worded differently? This is the header-blind companion to
+    heading_coverage(): that one asks 'is the topic an H-tag?', this asks 'is the
+    topic present at all?'. Driven by the gap-analyst's block-to-block clustering,
+    which already aligns differently-phrased coverage of the same topic, so a
+    topic everyone covers but writes up in their own words still reads as Yes.
+    Returns [{topic, present:{brand:bool}}] in cluster order."""
+    rows = []
+    for c in clusters.get("clusters", []):
+        present = {b: covers(brand_entry(c.get("brands"), b)) for b in order}
+        rows.append({"topic": c.get("name") or "", "present": present})
+    return rows
+
+
+_FAQ_STOP = set((
+    "a an the is are was were do does did of to for in on at with my our your their i you it its "
+    "what which how when why who whom whose can could will would should shall may might must need "
+    "and or vs versus be been being have has had this that these those if then than as about into "
+    "by from get got give vs. e g eg etc"
+).split())
+
+
+def _faq_tokens(q):
+    """Content tokens of an FAQ question, stop-words stripped — used to group
+    differently-worded questions about the same thing."""
+    toks = re.sub(r"[^\w\s]", " ", (q or "").lower()).split()
+    return set(t for t in toks if t not in _FAQ_STOP and len(t) > 2)
+
+
+def faq_coverage(gaps, pages, order, your):
+    """Every distinct FAQ across the pages as a Yes/No matrix: does each company
+    answer this question — even if they phrase it differently? Differently-worded
+    questions about the same thing are grouped by content-token overlap so e.g.
+    'Is a medical test required?' and 'Do I need a medical test for term
+    insurance?' count as one row. Prefers an explicit gaps['faq_coverage'] from
+    the gap-analyst (semantic, most accurate); otherwise clusters the raw page
+    FAQs deterministically. Returns [{question, present:{brand:bool}}],
+    most-covered first."""
+    # 1) gap-analyst semantic enrichment, if provided
+    enr = gaps.get("faq_coverage")
+    if isinstance(enr, list) and enr:
+        rows = []
+        for e in enr:
+            if not isinstance(e, dict):
+                continue
+            q = e.get("question") or e.get("q") or ""
+            pres = e.get("present")
+            if isinstance(pres, dict):
+                present = {b: bool(map_get(pres, b, False)) for b in order}
+            else:
+                ab = e.get("answered_by") or []
+                present = {b: any(_norm(b) == _norm(x) for x in ab) for b in order}
+            if q:
+                rows.append({"question": q, "present": present})
+        if rows:
+            rows.sort(key=lambda r: sum(r["present"].values()), reverse=True)
+            return rows
+    # 2) deterministic fallback — cluster page FAQs by token overlap
+    pbb = page_by_brand(pages)
+    groups = []  # [{rep, has_ours, toks, present:set}]
+    for b in order:
+        p = pbb.get(b) or {}
+        for fq in (p.get("faqs") or []):
+            q = (fq.get("question") or "").strip()
+            tk = _faq_tokens(q)
+            if not q or not tk:
+                continue
+            best, bestj = None, 0.0
+            for g in groups:
+                inter = len(tk & g["toks"])
+                union = len(tk | g["toks"]) or 1
+                j = inter / union
+                if j > bestj:
+                    best, bestj = g, j
+            if best is not None and bestj >= 0.5:
+                best["present"].add(b)
+                best["toks"] |= tk
+                # prefer OUR phrasing as the representative, else the shortest
+                if (b == your and not best["has_ours"]) or \
+                   (best["has_ours"] == (b == your) and len(q) < len(best["rep"])):
+                    best["rep"] = q
+                if b == your:
+                    best["has_ours"] = True
+            else:
+                groups.append({"rep": q, "has_ours": (b == your),
+                               "toks": set(tk), "present": {b}})
+    rows = [{"question": g["rep"], "present": {b: (b in g["present"]) for b in order}}
+            for g in groups]
+    rows.sort(key=lambda r: sum(r["present"].values()), reverse=True)
+    return rows
 
 
 def merged_outline(page):
@@ -506,7 +601,7 @@ def build_html(run_dir, meta, clusters, gaps, pages, your, order):
     o.append(f"<small>Your page: <code>{esc(gaps.get('your_url') or meta.get('your_url'))}</code> · type: <b>{esc(gaps.get('page_type') or meta.get('page_type'))}</b> · pages compared: {len(order)}</small>")
     o.append("<div class='toc'><b>Jump to:</b> <a href='#kpi'>Overview</a><a href='#titles'>Titles &amp; H1</a>"
              "<a href='#matrix'>Cluster map</a><a href='#unique'>Unique coverage</a><a href='#coverage'>Coverage per company</a>"
-             "<a href='#headcov'>Heading coverage</a>"
+             "<a href='#headcov'>Heading coverage</a><a href='#contentcov'>Content coverage</a>"
              "<a href='#content'>What each wrote (side-by-side)</a><a href='#struct'>Headings</a>"
              "<a href='#structure'>Page structure</a><a href='#faqs'>FAQs</a>"
              "<a href='#links'>Links</a><a href='#images'>Images</a><a href='#rank'>Ranking view</a>"
@@ -655,6 +750,45 @@ def build_html(run_dir, meta, clusters, gaps, pages, your, order):
             body = "<small>none — every styled topic title on this page is a real heading tag ✅</small>"
         o.append(f"<details{opn}><summary>{esc(b)}{' — OUR PAGE' if p.get('is_ours') else ''} · "
                  f"{len(rows)} topic(s) not in heading tags</summary>{body}</details>")
+
+    # content coverage matrix — topic x company (Yes/No), header-blind companion
+    cc_rows = content_coverage(clusters, order)
+    o.append("<h2 id='contentcov'>Content coverage — every topic, by company</h2>")
+    o.append(f"<small>Every topic across the pages ({len(cc_rows)} distinct), <b>whether or not</b> it sits in a heading tag. "
+             "<b>Yes</b> = that company's page covers this topic <b>anywhere</b> (heading or body copy) — even if it is "
+             "worded differently (semantically matched by the gap analysis, so the same idea written in another company's "
+             "words still counts). This is the header-blind companion to <a href='#headcov'>Heading coverage</a>: that table "
+             "asks ‘is the topic an H-tag?’, this one asks ‘is the topic present at all?’.</small>")
+    o.append("<table class='hc'><thead><tr><th style='text-align:left'>Topic</th>")
+    for b in order:
+        o.append(f"<th>{esc(b)}</th>")
+    o.append("</tr></thead><tbody>")
+    for r in cc_rows:
+        o.append(f"<tr><td style='text-align:left'>{esc(r['topic'])}</td>")
+        for b in order:
+            yes = r["present"].get(b)
+            o.append(f"<td class='{'yes' if yes else 'no'}'>{'Yes' if yes else 'No'}</td>")
+        o.append("</tr>")
+    o.append("</tbody></table>")
+
+    # FAQ coverage matrix — question x company (Yes/No), differently-worded grouped
+    fc_rows = faq_coverage(gaps, pages, order, your)
+    o.append("<h3>FAQ coverage — each question, by company</h3>")
+    o.append(f"<small>Every distinct FAQ across the pages ({len(fc_rows)} distinct). <b>Yes</b> = that company answers this "
+             "question, even if they phrase it differently — differently-worded questions about the same thing are grouped "
+             "into one row. Ranked most-covered first; the rows where your column reads <b>No</b> while others read Yes are "
+             "your FAQ gaps.</small>")
+    o.append("<table class='hc'><thead><tr><th style='text-align:left'>FAQ</th>")
+    for b in order:
+        o.append(f"<th>{esc(b)}</th>")
+    o.append("</tr></thead><tbody>")
+    for r in fc_rows:
+        o.append(f"<tr><td style='text-align:left'>{esc(r['question'])}</td>")
+        for b in order:
+            yes = r["present"].get(b)
+            o.append(f"<td class='{'yes' if yes else 'no'}'>{'Yes' if yes else 'No'}</td>")
+        o.append("</tr>")
+    o.append("</tbody></table>")
 
     # side-by-side: what each wrote, with similarity + deep links
     o.append("<h2 id='content'>What each page actually wrote — side by side</h2>")
@@ -867,7 +1001,16 @@ def build_xlsx(run_dir, meta, clusters, gaps, pages, your, order):
             for p in pages:
                 for s in p.get("sections", []):
                     w.writerow([p.get("brand"), "H" + str(s.get("level", "")), s.get("heading"), s.get("word_count"), s.get("text")])
-        return None, "openpyxl not installed — wrote full_content.csv (pip install openpyxl for the full workbook)."
+        # Content / FAQ coverage Yes-No matrices as standalone CSVs too
+        with open(os.path.join(run_dir, "content_coverage.csv"), "w", newline="", encoding="utf-8") as fh:
+            w = csv.writer(fh); w.writerow(["Topic"] + list(order))
+            for r in content_coverage(clusters, order):
+                w.writerow([r["topic"]] + ["Yes" if r["present"].get(b) else "No" for b in order])
+        with open(os.path.join(run_dir, "faq_coverage.csv"), "w", newline="", encoding="utf-8") as fh:
+            w = csv.writer(fh); w.writerow(["FAQ"] + list(order))
+            for r in faq_coverage(gaps, pages, order, your):
+                w.writerow([r["question"]] + ["Yes" if r["present"].get(b) else "No" for b in order])
+        return None, "openpyxl not installed — wrote full_content.csv + content_coverage.csv + faq_coverage.csv (pip install openpyxl for the full workbook)."
 
     pbb = page_by_brand(pages)
     wb = Workbook()
@@ -1010,6 +1153,34 @@ def build_xlsx(run_dir, meta, clusters, gaps, pages, your, order):
     for row in ws.iter_rows(min_row=2, min_col=5, max_col=5):
         row[0].alignment = wrap
     ws.auto_filter.ref = ws.dimensions
+
+    # Content Coverage — topic x company (Yes/No), header-blind companion to Heading Coverage
+    ws = sheet("Content Coverage", ["Topic"] + order)
+    for r in content_coverage(clusters, order):
+        ws.append([r["topic"]] + ["Yes" if r["present"].get(b) else "No" for b in order])
+    ws.column_dimensions["A"].width = 46
+    ws.auto_filter.ref = ws.dimensions
+    if ws.max_row > 1 and order:
+        rng = "B2:%s%d" % (get_column_letter(1 + len(order)), ws.max_row)
+        ws.conditional_formatting.add(rng, CellIsRule(
+            operator="equal", formula=['"Yes"'], fill=PatternFill("solid", fgColor="DCFCE7")))
+        ws.conditional_formatting.add(rng, CellIsRule(
+            operator="equal", formula=['"No"'], fill=PatternFill("solid", fgColor="FEE2E2")))
+
+    # FAQ Coverage — question x company (Yes/No), differently-worded questions grouped
+    ws = sheet("FAQ Coverage", ["FAQ"] + order)
+    for r in faq_coverage(gaps, pages, order, your):
+        ws.append([r["question"]] + ["Yes" if r["present"].get(b) else "No" for b in order])
+    ws.column_dimensions["A"].width = 64
+    for row in ws.iter_rows(min_row=2, min_col=1, max_col=1):
+        row[0].alignment = wrap
+    ws.auto_filter.ref = ws.dimensions
+    if ws.max_row > 1 and order:
+        rng = "B2:%s%d" % (get_column_letter(1 + len(order)), ws.max_row)
+        ws.conditional_formatting.add(rng, CellIsRule(
+            operator="equal", formula=['"Yes"'], fill=PatternFill("solid", fgColor="DCFCE7")))
+        ws.conditional_formatting.add(rng, CellIsRule(
+            operator="equal", formula=['"No"'], fill=PatternFill("solid", fgColor="FEE2E2")))
 
     # Full Content — every section, every page
     ws = sheet("Full Content", ["Page", "Level", "Heading", "Words", "Text"])

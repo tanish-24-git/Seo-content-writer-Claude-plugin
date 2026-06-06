@@ -49,6 +49,10 @@ Classify each finding as one of:
   competitor median → EXPAND.
 - **unique** — only OUR page covers it → KEEP/PROMOTE.
 - **faq** — a question competitors answer that OUR FAQ does not.
+  - *Optional enrichment:* also emit `faq_coverage` — the union of every distinct FAQ across all
+    pages with a per-brand `present` Yes/No map, **grouping differently-worded questions about the
+    same thing into one row** (semantic match, not string match). The report renders this as the
+    "FAQ coverage" Yes/No matrix; if omitted it falls back to deterministic token-overlap grouping.
 - **link** — an internal-link target/topic competitors link that OUR page does not. Use the
   **accurate `internal_links`** list (parsed from HTML by extract_page.py — already restricted to
   ON-PAGE editorial links; nav/header/footer boilerplate is excluded). Compare unique-target
@@ -111,6 +115,7 @@ competitor), each keyed by its canonical brand.
   "gaps": [{"id": "", "type": "missing|thin|unique|faq|link|example|quality", "cluster": "",
              "priority": 3, "title": "", "detail": "", "exemplar_brand": "", "recommendation": ""}],
   "faq_gaps": [{"question": "", "answered_by": [""]}],
+  "faq_coverage": [{"question": "", "present": {"<YOUR_BRAND>": false}}],
   "link_gaps": [{"topic_or_target": "", "present_in": [""]}],
   "quality": {"per_brand": {"<YOUR_BRAND>": {"word_count": 0, "h2": 0, "faqs": 0,
                "internal_links": 0, "schema": [""], "eeat": false, "freshness": ""}}},
