@@ -30,6 +30,11 @@ Score each page; report per-brand so OUR gaps are obvious.
 - [ ] **FAQ schema** when an FAQ section exists.
 - [ ] **Product / Article / BreadcrumbList** schema as appropriate.
 
+## Page experience (when `pagespeed.json` exists)
+- [ ] **Core Web Vitals pass on mobile** for real users: LCP ≤ 2.5 s, INP ≤ 200 ms, CLS ≤ 0.10
+      (CrUX; if only site-wide data exists, say so).
+- [ ] **Lighthouse SEO score** ≥ 90 and **accessibility** ≥ 90 (mobile).
+
 ## Compliance hygiene (fintech/insurance)
 - [ ] Regulatory/tax claims phrased correctly and **dated** (laws change).
 - [ ] No absolute/guaranteed-returns language unless the product warrants it.

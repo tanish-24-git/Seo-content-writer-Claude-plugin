@@ -38,9 +38,19 @@ when exactly ONE page covers a distinct topic the others don't, still emit it as
 (with just that brand present). These unique clusters power the report's "Unique coverage" view,
 so a topic only one company owns must not be dropped.
 
-## Step 2 — For each cluster, record who covers it and how deeply
+## Step 2 — For each cluster, record who covers it, how deeply, and under which heading
 For every brand, capture: present (bool), depth (0–3: absent/mention/standard/deep), word_count,
 has_example, has_table, and a short snippet of how they wrote it.
+
+Also record **where** on the page the topic lives — the report's topic matrix shows which heading
+level each company used for each topic:
+- `heading` — the page's own heading text for the section that covers this topic, copied
+  **verbatim** from that page's `sections[].heading` (so the report can find the section and show
+  its exact text). Pick the section that actually answers the topic, never the page H1 and never a
+  boilerplate block (disclaimers, footer, popular searches).
+- `heading_level` — that section's `level` (2, 3, 4…). Use `0` with `heading: ""` when the topic is
+  covered only inside body text with no dedicated heading.
+Omit both when `present` is false.
 
 ## Step 3 — Run the gap engine (see reference/gap-rubric.md for scoring)
 Classify each finding as one of:
@@ -100,8 +110,10 @@ competitor), each keyed by its canonical brand.
 ```json
 { "clusters": [
   {"id": "what-is", "name": "What is X", "intent": "informational",
-   "brands": {"<YOUR_BRAND>": {"present": true, "depth": 2, "word_count": 0, "has_example": false, "has_table": false, "snippet": ""},
-              "<COMPETITOR_BRAND>": {"present": true, "depth": 3, "word_count": 0, "has_example": true, "has_table": false, "snippet": ""}}}
+   "brands": {"<YOUR_BRAND>": {"present": true, "depth": 2, "word_count": 0, "has_example": false, "has_table": false, "snippet": "",
+                               "heading": "What is X?", "heading_level": 2},
+              "<COMPETITOR_BRAND>": {"present": true, "depth": 3, "word_count": 0, "has_example": true, "has_table": false, "snippet": "",
+                                     "heading": "", "heading_level": 0}}}
 ]}
 ```
 **gaps.json**

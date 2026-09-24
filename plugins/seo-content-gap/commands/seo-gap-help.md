@@ -21,8 +21,12 @@ what to write, expand, or add — then you can chat with it about the gaps.
    - It tells you **who ranks** for the topic — and **whether your page ranks**, and where.
 
 **What you get:**
-- A **visual report** (`report.html` → print to PDF), an **Excel** workbook with KPI filters
-  (`report.xlsx`), and a readable `report.md`, all under `./content-gap-runs/<topic>/`.
+- A **report in three formats** — `report.html`, `report.pdf` and an Excel `report.xlsx` —
+  plus a readable `report.md`, all under `./content-gap-runs/<topic>/`.
+- **Page speed & Core Web Vitals** for your page and every competitor (Google PageSpeed
+  Insights), and **authority / keywords** (Ahrefs, if connected).
+- The **H1–H4 heading hierarchy**, the **exact content** each page wrote per topic, and every
+  page's **FAQs** word for word.
 - **Clusters** (same topic, every brand side by side), **gaps** (missing / thin / unique /
   FAQ / internal-link / example / quality), and **content briefs**.
 
@@ -30,6 +34,7 @@ what to write, expand, or add — then you can chat with it about the gaps.
 - "what's missing vs the top 3 competitors?"
 - "show only the FAQ gaps"
 - "which internal links should I add?"
+- "how fast is my page compared to the others?"
 - "give me a content brief for the weakest cluster"
 - "re-run for my <other> page"
 
