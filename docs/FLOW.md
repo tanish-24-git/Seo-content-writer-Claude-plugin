@@ -8,7 +8,10 @@ flowchart TD
     D --> E[(per-page JSON:<br/>sections · FAQs · examples<br/>internal links · tables · schema · quality)]
     E --> F[Stage 3 — gap-analyst agent<br/>align block-to-block + FAQ-to-FAQ<br/>cluster topics · run gap engine]
     F --> G[(clusters.json + gaps.json)]
-    G --> H[Stage 4 — build_report.py<br/>report.html charts + report.xlsx filters + report.md]
+    D --> P[Stage 3b — fetch_pagespeed.py + fetch_ahrefs.py<br/>Core Web Vitals · Lighthouse · authority · keywords]
+    P --> Q[(pagespeed.json + authority.json)]
+    G --> H[Stage 4 — build_report.py<br/>report.html + report.pdf + report.xlsx + report.md]
+    Q --> H
     H --> I[Stage 5 — present<br/>ranking line · cluster matrix · top gaps · file paths]
     I --> J[Stage 6 — conversational session<br/>ask anything · get content briefs]
 ```
@@ -20,7 +23,8 @@ flowchart TD
 | 1 | **Discover + rank** | ranking list + whether your page ranks |
 | 2 | **Extract (parallel)** | `our.json`, `competitor-*.json` (block schema) |
 | 3 | **Align + cluster + gap engine** | `clusters.json`, `gaps.json` |
-| 4 | **Reports** | `report.html`, `report.xlsx` / CSV, `report.md` |
+| 3b | **Page speed + authority** (optional) | `pagespeed.json`, `authority.json` |
+| 4 | **Reports** | `report.html`, `report.pdf`, `report.xlsx` / CSV, `report.md` |
 | 5 | **Present** | inline summary + cluster matrix + top gaps |
 | 6 | **Converse** | answers + content briefs (no finished copy) |
 

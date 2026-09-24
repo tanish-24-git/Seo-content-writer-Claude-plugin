@@ -9,7 +9,12 @@ Install Claude Code and log in, then in a Claude session:
 /plugin install seo-content-gap@seo-content-gap-marketplace
 ```
 *(Optional, for the Excel report)* install Python and run `pip install openpyxl`. If you skip
-this, you still get the HTML report and CSV files.
+this, you still get the HTML report and CSV files. The PDF is printed automatically if Chrome or
+Edge is installed.
+
+*(Optional, for page speed and authority data)* PageSpeed Insights works with no setup; a
+`PSI_API_KEY` raises Google's quota. For Ahrefs data, either set `AHREFS_API_KEY` or connect the
+Ahrefs connector in Claude — the tool says roughly how many Ahrefs units a run uses before fetching.
 
 ## 2. Run an analysis
 Open a terminal in a **neutral folder** (a fresh content-work folder — *not* inside another
@@ -28,14 +33,18 @@ Then it crawls everything and tells you, among other things, **whether your page
 topic and where.
 
 ## 3. What you get (in `./content-gap-runs/<topic>/`)
-- **`report.html`** — the visual report. Double-click to open in a browser. To share as PDF:
-  **File → Print → Save as PDF**.
-- **`report.xlsx`** — Excel with filters (sort/slice the gaps, clusters, FAQs, links by priority).
-- **`report.md`** — a plain readable version.
+- **`report.html`** — the full report. Double-click to open in a browser; use the menu on the
+  left to jump between sections, and the filters to show only what your page is missing.
+- **`report.pdf`** — the same report as a document to share.
+- **`report.xlsx`** — Excel, one sheet per section, with filters.
+- **`report.md`** — a plain readable summary.
 
-The report shows: a **cluster matrix** (every topic × every competitor, who covered what and how
-deeply), **prioritised gaps** (what to add / expand), **FAQ gaps**, **internal-link gaps**, and a
-**content-quality table** (word count, examples, schema, author/reviewer, freshness).
+The report covers: an **executive summary**, **page speed & Core Web Vitals** (mobile and
+desktop), **technical SEO checks**, **keywords** (where the target phrase appears, and what each
+page ranks for), **authority** (backlinks, ratings), the **H1–H4 heading hierarchy** (which
+headings each page has), **topic coverage** (who covers each topic, under which heading level,
+how deeply), the **exact content** each page wrote per topic, **FAQs** word for word, **links and
+images**, and **recommendations**. Anything that was not measured says "Not available yet".
 
 ## 4. Then just chat
 After the report, keep typing questions:
@@ -67,5 +76,8 @@ tech lead can add this to their Claude settings (`~/.claude/settings.json` or pr
   The tool will tell you and offer to continue without it, or you can **paste that page's text**
   when asked and it will include it.
 - **No Excel file, only CSVs.** Install `openpyxl` (`pip install openpyxl`) and re-run.
-- **PDF?** Open `report.html` → Print → Save as PDF (works on any machine, no extra software).
+- **No PDF?** Install Chrome or Edge (or set `SEO_GAP_BROWSER` to its path) and re-run — or open
+  `report.html` → Print → Save as PDF.
+- **Page speed says "Not measured" / HTTP 429.** Google rate-limits keyless requests; set
+  `PSI_API_KEY` and re-run.
 - **It refused to write the article.** That's by design — it's a gap-finder, not a copywriter.

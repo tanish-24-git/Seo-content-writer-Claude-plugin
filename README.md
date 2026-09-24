@@ -27,12 +27,18 @@ deltas, and content briefs so a human writer can move quickly.
 6. It computes **gaps** (missing / thin / unique / FAQ / internal-link / example / quality)
    with **priority scores**, plus **content-quality** signals (depth, examples, schema,
    E-E-A-T author/reviewer, freshness, readability) and whether pages follow SEO guidelines.
-7. It generates a **visual report**:
-   - **`report.html`** — KPI cards, a cluster-coverage matrix, charts, and a filterable gap
-     table. Open in any browser → **Print → Save as PDF**.
-   - **`report.xlsx`** — multi-sheet workbook with **KPI filters** (great for sorting/slicing).
-   - **`report.md`** — a readable text version.
-8. It then stays **conversational** — ask it anything about the gaps and get **content
+7. It measures **page speed & Core Web Vitals** for every page (Google PageSpeed Insights —
+   real-user CrUX data + Lighthouse, mobile and desktop) and, when Ahrefs is available,
+   **authority & visibility** (URL/Domain Rating, backlinks, referring domains, ranking keywords).
+8. It generates the report in **three formats**, same content in each:
+   - **`report.html`** — the full report: executive summary, page speed, technical SEO,
+     keywords, authority, the H1–H4 heading hierarchy (present or not per page), topic coverage
+     with the heading level each page used, the exact content per topic, FAQs verbatim, links,
+     images, and recommendations — with filters and search.
+   - **`report.pdf`** — the same report, printed automatically with your installed Chrome/Edge.
+   - **`report.xlsx`** — one sheet per section plus full-detail sheets.
+   - (plus **`report.md`**, a readable text summary)
+9. It then stays **conversational** — ask it anything about the gaps and get **content
    briefs / outlines / checklists** (never finished prose).
 
 ---
@@ -40,8 +46,14 @@ deltas, and content briefs so a human writer can move quickly.
 ## Install (one-time)
 
 > Requires [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and
-> authenticated. The XLSX report additionally uses Python + `openpyxl` (optional; the plugin
-> degrades to CSV if it's missing).
+> authenticated. The report scripts use Python 3; the XLSX needs `openpyxl` (the plugin
+> degrades to CSV if it's missing) and the PDF needs Chrome or Edge installed.
+>
+> Optional data sources:
+> - **PageSpeed Insights** is free and works without a key; set `PSI_API_KEY` (or
+>   `PSI_SERVICE_ACCOUNT_JSON` + `pip install google-auth`) for a higher quota.
+> - **Ahrefs** uses `AHREFS_API_KEY`, or a connected Ahrefs connector in Claude. Without either,
+>   the authority sections show "Not available yet".
 
 In a Claude Code session:
 
@@ -59,7 +71,7 @@ cd <a-folder-where-you-keep-content-work>
 claude
 > /seo-gap https://www.example.com/your-term-plan-page
 #   → it guides you: add competitor URLs (or press Enter to auto-discover)
-#   → crawl → align → cluster → gap report (HTML + XLSX + MD)
+#   → crawl → align → cluster → page speed + authority → report (HTML + PDF + XLSX)
 #   → then just chat:
 > what's missing vs the top 3 competitors?
 > show only the FAQ gaps
@@ -84,7 +96,10 @@ plugins/seo-content-gap/            the plugin
   agents/                           page-extractor, competitor-finder, gap-analyst
   skills/seo-content-gap/SKILL.md   the orchestrator + conversation rules
   skills/.../reference/             extraction schema, gap rubric, brief template, QA checklist
-  scripts/build_report.py           gaps.json → report.html (charts) + report.xlsx (KPI filters)
+  scripts/build_report.py           run JSON → report.html + report.pdf + report.xlsx
+  scripts/report_*.py               data layer and HTML / XLSX / PDF renderers
+  scripts/fetch_pagespeed.py        Core Web Vitals via Google PageSpeed Insights → pagespeed.json
+  scripts/fetch_ahrefs.py           authority + keywords via Ahrefs → authority.json
 docs/                               USAGE.md, FLOW.md, examples/
 ```
 

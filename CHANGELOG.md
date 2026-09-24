@@ -3,6 +3,38 @@
 All notable changes to the SEO Content-Gap plugin are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] — 2026-09-24
+### Added — page speed, authority, and a professional three-format report
+- **Page speed & Core Web Vitals** (`scripts/fetch_pagespeed.py`): Google PageSpeed Insights v5
+  for your page and every competitor, mobile and desktop → `pagespeed.json`. Real-user CrUX p75
+  (LCP, INP, CLS, FCP, TTFB, overall assessment; flags site-wide fallback), Lighthouse lab metrics,
+  performance / accessibility / best-practice / SEO scores, and the top failing audits per page.
+  Ported from the SEO platform's PSI adapter: shared rate limiter, Retry-After / jittered backoff
+  on 429/5xx, 7-day cache. Auth via `PSI_API_KEY`, `PSI_SERVICE_ACCOUNT_JSON`, or keyless.
+- **Authority & visibility** (`scripts/fetch_ahrefs.py`): Ahrefs URL Rating, Domain Rating,
+  organic traffic, keywords (top 100 / top 3), referring domains, backlinks and each page's ranking
+  keywords → `authority.json`. Works with `AHREFS_API_KEY` (REST) or from Ahrefs connector
+  responses (`--list` / `--assemble`), sharing one parser.
+- **Report redesign** — `report.html`, **`report.pdf`** (printed automatically via local
+  Chrome/Edge) and `report.xlsx`, same sections in each: executive summary, page speed, technical
+  & on-page SEO, keywords (placement of the target phrase + Ahrefs ranking keywords), visibility &
+  authority, **H1–H4 heading hierarchy** (present or not per page, filterable), topic coverage with
+  the **heading level each page used** per topic, **exact content by topic** with similarity,
+  **FAQs verbatim** plus coverage matrix, links & images, recommendations, method & sources.
+  Restrained neutral styling; status shown as text with a small marker. Sections whose data source
+  did not run render "Not available yet".
+- `build_report.py --out DIR` writes the report elsewhere (keeps an existing report intact);
+  `--no-pdf` skips the PDF.
+- `gap-analyst` now records `heading` + `heading_level` per brand per cluster, so the topic matrix
+  shows the exact heading instead of a matched guess (older runs fall back to matching).
+
+### Changed
+- Report code split into `report_core.py` (data layer), `report_html.py`, `report_xlsx.py`,
+  `report_pdf.py`; `build_report.py` is the CLI and re-exports the core helpers.
+- Section text is scrubbed of lead-form / consent / feedback-survey boilerplate.
+- FAQ grouping ignores the run's topic words, so differently-themed questions no longer merge
+  just because they share "term insurance for women".
+
 ## [0.6.0] — 2026-06-07
 ### Added — Content Coverage + FAQ Coverage (header-blind, semantically matched)
 - **New "Content coverage — every topic, by company" section** (HTML + new **Content Coverage**
