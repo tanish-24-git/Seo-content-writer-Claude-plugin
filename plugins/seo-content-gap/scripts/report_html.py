@@ -324,7 +324,7 @@ def nav(h):
     h.A("<h6>Each page in full</h6>")
     for b in h.order:
         h.A(f'<a class="sub" href="#{h.pid(b)}">{esc(h.name(b))}{" (our page)" if b == h.you else ""}</a>')
-    h.A('<h6>Appendix</h6><a href="#method"><span class="no">A</span>Method &amp; sources</a></nav>')
+    h.A("</nav>")
 
 
 def header(h):
@@ -334,7 +334,8 @@ def header(h):
     h.A(f'<div class="top"><div class="k">Competitive content comparison · {esc(meta.get("page_type") or "page")} page</div>'
         f'<h1>{esc((c["topic"] or "Content").title())}: {esc(h.name(h.you))} vs competitors</h1>'
         f'<p>Our page: <a href="{esc(meta.get("your_url"))}" target="_blank" rel="noopener">{esc(meta.get("your_url"))}</a></p>'
-        f'<p>Compared with {comps} · Data collected {esc(date)}</p></div>')
+        f'<p>Compared with {comps} · Data collected {esc(date)}</p>'
+        + (f'<p>Prepared by {esc(meta.get("prepared_by"))}</p>' if meta.get("prepared_by") else "") + "</div>")
 
 
 def summary(h):
@@ -410,7 +411,7 @@ def summary(h):
 
 
 def pages_compared(h):
-    h.section("pages", "2", "Pages compared", "The exact pages analysed, as fetched on the collection date.")
+    h.section("pages", "2", "Pages compared", "The pages compared, as published on the date of comparison.")
     rows = []
     for b in h.order:
         p = h.pages[b]
@@ -419,9 +420,6 @@ def pages_compared(h):
                     f'<td class="num">{_int(p.get("word_count_total")):,}</td></tr>')
     h.A('<div class="tw"><table><thead><tr><th>Brand</th><th>Page</th><th>Page title</th><th>Main heading (H1)</th><th class="c">Words</th></tr></thead><tbody>'
         + "".join(rows) + "</tbody></table></div>")
-    notes = h.meta.get("notes") or []
-    if notes:
-        h.A("<h4>Notes on the pages analysed</h4><ul class=plain>" + "".join(f"<li>{esc(n)}</li>" for n in notes) + "</ul>")
     h.end()
 
 
@@ -438,7 +436,7 @@ def visibility(h):
     rows.append(("Searches where the brand appears", lambda b: f'{sum(1 for x in hits[b] if x)} of {len(buyer)}', "tot"))
     h.table("Search", rows)
     depth = max((len(r) for _, r in serp_queries(c)), default=0)
-    h.A(f'<p class="small">Top {depth} results recorded per search. Positions vary by location, device and date.</p>')
+    h.A(f'<p class="small">Based on the top {depth} results for each search. Positions vary by location, device and date.</p>')
     doms = brand_domains(c)
     h.A('<details class="topic"><summary><b>See the full results for every search</b></summary><div style="padding:12px 16px">')
     for q, res in serp_queries(c):
@@ -483,13 +481,8 @@ def speed(h):
         body = "".join(f'<tr><td class="lab">{esc(plain)}<div class="small" style="font-weight:400">{esc(tech)}</div></td>'
                        + "".join(h.td(b, fn(b)) for b in h.order) + "</tr>" for (plain, fn), (_, _, tech) in zip(rows, LAB))
         h.A('<div class="tw"><table class="cmp"><thead><tr>' + h.th("Measurement") + "</tr></thead><tbody>" + body + "</tbody></table></div>")
-    versions = sorted({(psi_rec(c, b, d) or {}).get("lighthouse_version") for b in h.order for d in ("mobile", "desktop")} - {None, ""})
-    src = psi.get("source") or "PageSpeed Insights"
-    note = f"Source: {esc(src)}" + (f", Lighthouse {esc(', '.join(versions))}" if versions and not any(v in src for v in versions) else "")
-    note += f", measured {esc((psi.get('fetched_at') or '')[:10])}." if psi.get("fetched_at") else "."
-    if "lighthouse" in (psi.get("engines") or []):
-        note += " One run per page and device; values can move a few points between runs."
-    h.A(f'<p class="small">{note}</p>')
+    when = (psi.get("fetched_at") or "")[:10]
+    h.A(f'<p class="small">Measured with Google Lighthouse{f" on {esc(when)}" if when else ""}.</p>')
     h.end()
 
 
@@ -768,24 +761,6 @@ def page_detail(h, b, idx):
     h.A("</section>")
 
 
-def method(h):
-    c, meta = h.c, h.meta
-    psi = c.get("psi") or {}
-    h.A('<section id="method"><h2><span class="n">A</span>Method &amp; sources</h2><ul class=plain>')
-    items = [
-        f"Pages: fetched on {esc(meta.get('created_at') or '')}; headings, links, images, tables and structured data read from each page's HTML; "
-        "each section then read for its meaning, FAQs, examples and figures.",
-        "Topics: sections from all pages grouped into shared topics; each page marked Covered (has a section), Mentioned (referred to briefly) or not covered.",
-        "FAQs: questions grouped across pages when they ask the same thing in different words.",
-        "Search visibility: results recorded for each search; positions vary by location, device and date.",
-        f"Page speed: {esc(psi.get('source') or 'not collected')}.",
-    ]
-    if not c.get("auth"):
-        items.append("Authority metrics (backlinks, domain rating) are not included: no Ahrefs data was collected for this run.")
-    h.A("".join(f"<li>{x}</li>" for x in items) + "</ul>")
-    h.A(f'<p class="foot">Generated {datetime.now().strftime("%d %b %Y, %H:%M")} · run folder: {esc(c.get("run_name"))}</p></section>')
-
-
 # ----------------------------------------------------------------------------- entry
 def render(ctx, print_mode=False):
     h = R(ctx, print_mode)
@@ -799,6 +774,5 @@ def render(ctx, print_mode=False):
         fn(h)
     for i, b in enumerate(h.order, 1):
         page_detail(h, b, i)
-    method(h)
     h.A(f"</main><script>{JS}</script></body></html>")
     return "".join(h.out)

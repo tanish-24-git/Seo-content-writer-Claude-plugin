@@ -16,10 +16,12 @@ This project follows [Semantic Versioning](https://semver.org/).
   H1s, H1/H2 outlines side by side, shared headings), topic coverage by intent, **content side by
   side** per topic (heading used, coverage summary, the page's own text), FAQ comparison (with
   search), figures & claims, and a **detail view for every page** (outline, verbatim content by
-  section, FAQs, examples, links, images), then method & sources.
-- The HTML report is **comparison-only**: no recommendations, action lists or audit "fixes".
-- Reads optional `meta.json` keys `display_names` (labels for brands) and `competitors[].domains`
-  (extra domains a brand ranks under); search data from `ranking.json` or `serp.json`.
+  section, FAQs, examples, links, images).
+- The HTML report is **comparison-only**: no recommendations, action lists or audit "fixes", and no
+  notes on how the data was collected.
+- Reads optional `meta.json` keys `display_names` (labels for brands), `prepared_by` (team shown in
+  the header) and `competitors[].domains` (extra domains a brand ranks under); search data from
+  `ranking.json` or `serp.json`.
 
 ### Added
 - `fetch_pagespeed.py --engine auto|psi|lighthouse`: when PageSpeed Insights fails on quota or

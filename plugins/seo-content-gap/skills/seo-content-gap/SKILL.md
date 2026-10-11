@@ -96,9 +96,10 @@ Work inside the user's current directory. Create a run folder:
   heading structure (H1–H4 counts, missing H1s, H1/H2 outlines side by side) · topic coverage ·
   content side by side (what each page wrote, per topic) · FAQ comparison · figures & claims ·
   one **detail view per page** (outline, verbatim content by section, FAQs, examples, links,
-  images) · method & sources. It states what each page has; it carries no recommendations.
-  Optional `meta.json` keys it reads: `display_names` {brand: label} and `competitors[].domains`
-  (extra domains a brand ranks under).
+  images). It states what each page has; it carries no recommendations and no notes on how the
+  data was collected. Optional `meta.json` keys it reads: `display_names` {brand: label},
+  `prepared_by` (team name for the header) and `competitors[].domains` (extra domains a brand
+  ranks under).
 - Also write a readable **`report.md`** yourself from `gaps.json` + `clusters.json` containing:
   the ranking result, KPI summary, the **cluster matrix** (rows = clusters, columns = brands,
   ✓/✗ + depth), the **prioritised gap list**, **FAQ gaps**, **internal-link gaps**, the
