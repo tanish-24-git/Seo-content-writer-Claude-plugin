@@ -3,6 +3,27 @@
 All notable changes to the SEO Content-Gap plugin are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.8.0] — 2026-10-11
+### Changed — comparison-only stakeholder HTML report
+- **`report.html` redesigned** (`scripts/report_html.py`) for senior stakeholders: white / light-blue
+  theme with a yellow accent for your page, a **fixed sidebar index** with active-section
+  highlighting, and a reading column. Sections: summary scorecard + factual observations, pages
+  compared, search visibility per query (full result lists), page speed (Lighthouse scores and lab
+  Core Web Vitals, mobile and desktop; CrUX field data when present), on-page SEO (title, meta, H1,
+  robots, canonical, schema, phrase placement), heading structure (H1–H4 counts, missing / multiple
+  H1s, H1/H2 outlines side by side, shared headings), topic coverage by intent, **content side by
+  side** per topic (heading used, coverage summary, the page's own text), FAQ comparison (with
+  search), figures & claims, and a **detail view for every page** (outline, verbatim content by
+  section, FAQs, examples, links, images), then method & sources.
+- The HTML report is **comparison-only**: no recommendations, action lists or audit "fixes".
+- Reads optional `meta.json` keys `display_names` (labels for brands) and `competitors[].domains`
+  (extra domains a brand ranks under); search data from `ranking.json` or `serp.json`.
+
+### Added
+- `fetch_pagespeed.py --engine auto|psi|lighthouse`: when PageSpeed Insights fails on quota or
+  the network, pages are re-measured with **local Lighthouse** (`npx lighthouse@13.4.1`) in the
+  installed Chrome/Edge, sequentially; `pagespeed.json` records the engine used per page.
+
 ## [0.7.0] — 2026-09-24
 ### Added — page speed, authority, and a professional three-format report
 - **Page speed & Core Web Vitals** (`scripts/fetch_pagespeed.py`): Google PageSpeed Insights v5

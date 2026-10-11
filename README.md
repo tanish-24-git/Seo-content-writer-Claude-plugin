@@ -31,10 +31,11 @@ deltas, and content briefs so a human writer can move quickly.
    real-user CrUX data + Lighthouse, mobile and desktop) and, when Ahrefs is available,
    **authority & visibility** (URL/Domain Rating, backlinks, referring domains, ranking keywords).
 8. It generates the report in **three formats**, same content in each:
-   - **`report.html`** — the full report: executive summary, page speed, technical SEO,
-     keywords, authority, the H1–H4 heading hierarchy (present or not per page), topic coverage
-     with the heading level each page used, the exact content per topic, FAQs verbatim, links,
-     images, and recommendations — with filters and search.
+   - **`report.html`** — a comparison-only stakeholder report (white/blue, sidebar index):
+     summary scorecard, search visibility, page speed & Lighthouse scores, on-page SEO, H1–H4
+     structure (missing H1s, outlines side by side), topic coverage, what each page wrote per topic
+     side by side, FAQ comparison, figures & claims, and a full detail view of every page
+     (outline, verbatim content, FAQs, links, images). It compares; it does not recommend.
    - **`report.pdf`** — the same report, printed automatically with your installed Chrome/Edge.
    - **`report.xlsx`** — one sheet per section plus full-detail sheets.
    - (plus **`report.md`**, a readable text summary)
@@ -51,7 +52,8 @@ deltas, and content briefs so a human writer can move quickly.
 >
 > Optional data sources:
 > - **PageSpeed Insights** is free and works without a key; set `PSI_API_KEY` (or
->   `PSI_SERVICE_ACCOUNT_JSON` + `pip install google-auth`) for a higher quota.
+>   `PSI_SERVICE_ACCOUNT_JSON` + `pip install google-auth`) for a higher quota. When the keyless
+>   quota runs out, pages are measured with local Lighthouse (needs Node.js and Chrome/Edge).
 > - **Ahrefs** uses `AHREFS_API_KEY`, or a connected Ahrefs connector in Claude. Without either,
 >   the authority sections show "Not available yet".
 

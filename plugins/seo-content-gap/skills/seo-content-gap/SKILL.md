@@ -65,8 +65,11 @@ Work inside the user's current directory. Create a run folder:
   URL in `meta.json` on mobile and desktop and writes `pagespeed.json`. Takes ~1–2 minutes.
 - Credentials are optional and read from the environment: `PSI_API_KEY`, or
   `PSI_SERVICE_ACCOUNT_JSON` (path to a Google service-account key; needs `pip install google-auth`).
-  Without either it runs keyless, which Google rate-limits — if many pages fail with HTTP 429,
-  tell the user a key raises the quota.
+  Without either it runs keyless, which Google rate-limits. With the default `--engine auto`,
+  any page that fails on quota (HTTP 429) or the network is re-measured with **local Lighthouse**
+  (`npx lighthouse`, the engine PSI runs) in the installed Chrome/Edge — lab data and scores, no
+  CrUX field data; ~1–2 minutes per page/device, run sequentially. Tell the user which engine was
+  used (`pagespeed.json` → `source`) and that a `PSI_API_KEY` adds real-user field data.
 
 **Ahrefs** (paid units — URL Rating, Domain Rating, backlinks, referring domains, organic keywords):
 - Tell the user it costs roughly 250 Ahrefs API units per page and proceed unless they decline.
@@ -87,10 +90,15 @@ Work inside the user's current directory. Create a run folder:
   if no browser is found it says so — then the user can print the HTML), and `report.xlsx`
   (one sheet per section plus full-detail sheets; CSV fallback if `openpyxl` is missing).
   Use `--out <dir>` to write elsewhere (never overwrite a report the user asked to keep).
-- Report sections: executive summary · page speed & Core Web Vitals · technical & on-page SEO ·
-  keywords · search visibility & authority · heading structure (H1–H4 hierarchy, present or not per
-  page) · topic coverage & gaps (heading level used per topic) · content by topic (exact text) ·
-  FAQs (coverage + verbatim Q&A) · links & images · recommendations · method & data sources.
+- `report.html` is a **comparison-only** stakeholder report (white/blue, fixed sidebar index):
+  summary scorecard · pages compared · search visibility · page speed & Lighthouse scores (mobile
+  and desktop) · on-page SEO (title, meta, H1, robots, canonical, schema, phrase placement) ·
+  heading structure (H1–H4 counts, missing H1s, H1/H2 outlines side by side) · topic coverage ·
+  content side by side (what each page wrote, per topic) · FAQ comparison · figures & claims ·
+  one **detail view per page** (outline, verbatim content by section, FAQs, examples, links,
+  images) · method & sources. It states what each page has; it carries no recommendations.
+  Optional `meta.json` keys it reads: `display_names` {brand: label} and `competitors[].domains`
+  (extra domains a brand ranks under).
 - Also write a readable **`report.md`** yourself from `gaps.json` + `clusters.json` containing:
   the ranking result, KPI summary, the **cluster matrix** (rows = clusters, columns = brands,
   ✓/✗ + depth), the **prioritised gap list**, **FAQ gaps**, **internal-link gaps**, the

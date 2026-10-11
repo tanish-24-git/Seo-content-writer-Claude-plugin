@@ -1,814 +1,781 @@
-"""HTML renderer for the content-gap report (screen + print/PDF variants).
+"""HTML renderer: a self-contained, comparison-only competitive content report.
 
-render(ctx, print_mode=False) -> str. `ctx` comes from report_core.build_context.
-Self-contained output: inline CSS/JS, no CDN. Print mode expands every
-collapsible block and leaves out raw link/image/page-structure dumps (they stay
-in the HTML and XLSX) so the PDF reads as a document.
+render(ctx, print_mode=False) -> str
+
+Layout: a fixed sidebar index (sections + one entry per compared page) and a
+white / blue reading column. Every section states what each page has — search
+visibility, page speed and Lighthouse scores, on-page SEO, H1-H4 structure,
+topic coverage, the content each page wrote side by side, FAQs, figures and
+claims — and a full detail view per page (outline, verbatim content by section,
+FAQs, examples, links, images). The report compares; it does not recommend.
+
+Standard library only; no external CSS, fonts or scripts.
 """
-from datetime import date
+import json
+import os
+import re
+from datetime import datetime
+from urllib.parse import urlparse
 
-from report_core import (DEPTH_LABEL, FIELD_CATEGORY, PRIORITY_LABEL, esc, keyword_checks, internal_link_count,
-                         median, onpage_internal_links, rate, serp_matrix, sim_verdict, similarity)
+from report_core import _load, clean_text, esc, internal_link_count, keyword_checks, onpage_internal_links, rate
 
-STATUS = {"good": "Good", "ni": "Needs improvement", "poor": "Poor", "": "No data"}
+DEPTH = {3: ("Deep", "d3"), 2: ("Standard", "d2"), 1: ("Mention", "d1"), 0: ("—", "d0")}
+INTENT = {"high": "High-value topics", "medium": "Supporting topics", "low": "Background topics"}
+CATS = (("performance", "Performance"), ("accessibility", "Accessibility"), ("best-practices", "Best practices"), ("seo", "SEO"))
+LAB = (("lcp_ms", "LCP", "Largest Contentful Paint"), ("cls", "CLS", "Cumulative Layout Shift"),
+       ("tbt_ms", "TBT", "Total Blocking Time"), ("fcp_ms", "FCP", "First Contentful Paint"),
+       ("si_ms", "Speed Index", "Speed Index"), ("ttfb_ms", "TTFB", "Server response time"),
+       ("bytes", "Page weight", "Total transfer size"))
+STATUS = {"good": "Good", "ni": "Needs improvement", "poor": "Poor"}
 
-CSS = r"""
-:root{--ink:#0f172a;--text:#334155;--muted:#64748b;--line:#e2e8f0;--line2:#cbd5e1;
---bg:#ffffff;--panel:#f8fafc;--accent:#1e3a5f;--you:#f1f5f9;
---good:#15803d;--ni:#b45309;--poor:#b91c1c}
-*{box-sizing:border-box}
-html{-webkit-text-size-adjust:100%}
-body{margin:0;background:var(--bg);color:var(--text);font:14px/1.55 "Segoe UI",system-ui,-apple-system,"Helvetica Neue",Arial,sans-serif;font-variant-numeric:tabular-nums}
-a{color:var(--accent)}
-.wrap{display:grid;grid-template-columns:232px minmax(0,1fr);max-width:1320px;margin:0 auto}
-nav.toc{position:sticky;top:0;align-self:start;height:100vh;padding:28px 20px 28px 24px;border-right:1px solid var(--line);font-size:13px}
-nav.toc .brand{font-weight:600;color:var(--ink);font-size:13px;letter-spacing:.02em;margin-bottom:18px}
-nav.toc ol{list-style:none;margin:0;padding:0;counter-reset:s}
-nav.toc li{counter-increment:s;margin:0}
-nav.toc a{display:block;padding:6px 8px;border-radius:4px;color:var(--text);text-decoration:none}
-nav.toc a::before{content:counter(s) ".";color:var(--muted);display:inline-block;width:20px}
-nav.toc a:hover{background:var(--panel);color:var(--ink)}
-nav.toc .dl{margin-top:24px;padding-top:16px;border-top:1px solid var(--line)}
-nav.toc .dl a::before{content:none}
-main{padding:36px 48px 64px;min-width:0}
-header.cover{border-bottom:2px solid var(--accent);padding-bottom:20px;margin-bottom:8px}
-.eyebrow{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);font-weight:600}
-h1{font-size:26px;line-height:1.25;color:var(--ink);margin:6px 0 10px;font-weight:600}
-.meta{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:4px 24px;font-size:12.5px;margin-top:14px}
-.meta div span{display:block;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em}
-.meta div b{font-weight:500;color:var(--ink);overflow-wrap:anywhere}
-section{padding-top:36px}
-h2{font-size:18px;color:var(--ink);margin:0 0 4px;font-weight:600;display:flex;gap:10px;align-items:baseline}
-h2 .n{color:var(--muted);font-weight:500;font-size:14px;min-width:22px}
-.lede{color:var(--muted);margin:0 0 18px;max-width:78ch}
-h3{font-size:14px;color:var(--ink);margin:26px 0 10px;font-weight:600}
-.kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:0;border:1px solid var(--line);border-radius:6px;margin-bottom:22px}
-.kpi{padding:16px 18px;border-right:1px solid var(--line)}
-.kpi:last-child{border-right:0}
-.kpi .l{font-size:11.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
-.kpi .v{font-size:26px;color:var(--ink);font-weight:600;margin:4px 0 2px}
-.kpi .v small{font-size:13px;color:var(--muted);font-weight:500}
-.kpi .s{font-size:12.5px}
-.findings{margin:0;padding:0;list-style:none;border-top:1px solid var(--line)}
-.findings li{display:grid;grid-template-columns:150px 1fr;gap:16px;padding:12px 0;border-bottom:1px solid var(--line)}
-.findings li b{color:var(--ink);font-weight:600}
-.tbl{width:100%;overflow-x:auto;border:1px solid var(--line);border-radius:6px}
-table{border-collapse:collapse;width:100%;font-size:13px}
-th,td{padding:9px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
-thead th{background:var(--panel);color:var(--ink);font-weight:600;font-size:12px;border-bottom:1px solid var(--line2);white-space:nowrap}
-thead th em{display:block;font-style:normal;font-weight:500;color:var(--muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.05em}
-tbody tr:last-child td{border-bottom:0}
-td.num,th.num{text-align:right;white-space:nowrap}
-th.you,td.you,tr.you td{background:var(--you)}
-tr.you td:first-child{box-shadow:inset 3px 0 0 var(--accent);font-weight:600;color:var(--ink)}
-td.rowh{color:var(--ink);font-weight:500;white-space:nowrap}
-td.rowh small{display:block;color:var(--muted);font-weight:400;font-size:11.5px}
-.m{display:inline-block}
-.m{color:var(--ink)}
-.m-poor::before,.m-ni::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;margin-right:6px;vertical-align:middle;position:relative;top:-1px}
-.m-poor::before{background:var(--poor)}.m-ni::before{background:var(--ni)}
-.m-poor{font-weight:600}
-.st{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
-.st i{width:7px;height:7px;border-radius:50%;background:var(--muted)}
-.st-good i{background:var(--good)}.st-ni i{background:var(--ni)}.st-poor i{background:var(--poor)}
-.pill{display:inline-block;font-size:11px;font-weight:600;padding:1px 8px;border-radius:10px;border:1px solid var(--line2);color:var(--text);white-space:nowrap}
-.pill.high{border-color:var(--ink);color:var(--ink)}
-.legend{display:flex;flex-wrap:wrap;gap:6px 20px;font-size:12px;color:var(--muted);margin:10px 0 0}
-.printonly{display:none}
-.note{font-size:12px;color:var(--muted);margin-top:8px}
-.sample{border:1px dashed var(--line2);background:var(--panel);padding:8px 12px;border-radius:4px;font-size:12px;color:var(--text);margin-bottom:12px}
-.seg{display:inline-flex;border:1px solid var(--line2);border-radius:5px;overflow:hidden;margin-bottom:12px}
-.seg button{font:inherit;font-size:12.5px;border:0;background:#fff;color:var(--text);padding:5px 14px;cursor:pointer}
-.seg button[aria-pressed=true]{background:var(--accent);color:#fff}
-.two{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:24px}
-.bar{display:grid;grid-template-columns:130px 1fr 54px;gap:10px;align-items:center;font-size:12.5px;padding:3px 0}
-.bar .t{height:8px;background:var(--line);border-radius:2px;overflow:hidden}
-.bar .t b{display:block;height:100%;background:#94a3b8}
-.bar.you .t b{background:var(--accent)}
-.bar.you span:first-child{font-weight:600;color:var(--ink)}
-.bar span:last-child{text-align:right;color:var(--ink)}
-footer{margin-top:48px;padding-top:14px;border-top:1px solid var(--line);font-size:11.5px;color:var(--muted)}
-@media (max-width:960px){.wrap{grid-template-columns:1fr}nav.toc{position:static;height:auto;border-right:0;border-bottom:1px solid var(--line)}
- main{padding:24px 16px}.meta,.kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.kpi:nth-child(2){border-right:0}
- .two{grid-template-columns:1fr}.findings li{grid-template-columns:1fr;gap:2px}}
-@media print{
- @page{size:A4;margin:14mm 12mm 16mm}
- body{font-size:10.5px}
- .wrap{display:block;max-width:none}
- nav.toc,.seg,.noprint{display:none!important}
- main{padding:0}
- section{padding-top:18px;break-inside:auto}
- section.pb{break-before:page}
- h2,h3{break-after:avoid}
- tr,.kpi,.findings li{break-inside:avoid}
- .tbl{overflow:visible;border-color:#cbd5e1}
- th,td{padding:5px 7px}
- thead{display:table-header-group}
- .both [data-view]{display:block!important}
- .printonly{display:block}
- .kpi .v{font-size:20px}
- a{color:inherit;text-decoration:none}
-}
-
-.mx th.c,.mx td.c{text-align:center;white-space:nowrap}
-.yes{color:var(--ink);font-weight:600}.no{color:#cbd5e1}
-.tag{display:inline-block;min-width:26px;margin-right:8px;padding:0 5px;border:1px solid var(--line2);border-radius:3px;font-size:10.5px;font-weight:600;color:var(--muted);text-align:center;line-height:16px;vertical-align:1px}
-.dp{display:block;color:var(--muted);font-size:10.5px}
-.muted{color:var(--muted)}.nowrap{white-space:nowrap}
-.tree td.h{white-space:normal;min-width:320px}
-.tree tr.lv1 td.h{font-weight:600;color:var(--ink)}
-.tree tr.lv2 td.h{padding-left:28px;color:var(--ink)}
-.tree tr.lv3 td.h{padding-left:52px}
-.tree tr.lv4 td.h{padding-left:76px;color:var(--muted)}
-.scroll{max-height:640px;overflow:auto}
-.scroll thead th{position:sticky;top:0;z-index:1}
-.tools{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:0 0 10px}
-.tools .seg{margin:0}
-.search{font:inherit;font-size:12.5px;padding:5px 10px;border:1px solid var(--line2);border-radius:5px;min-width:220px}
-.btn{font:inherit;font-size:12.5px;padding:5px 12px;border:1px solid var(--line2);border-radius:5px;background:#fff;color:var(--text);cursor:pointer}
-.callout{border-left:3px solid var(--accent);background:var(--panel);padding:10px 14px;margin:16px 0;font-size:13px}
-details.acc{border:1px solid var(--line);border-radius:6px;margin:8px 0;background:#fff}
-details.acc>summary{cursor:pointer;padding:10px 14px;display:flex;flex-wrap:wrap;gap:4px 14px;align-items:baseline;list-style:none}
-details.acc>summary::-webkit-details-marker{display:none}
-details.acc>summary::before{content:"▸";color:var(--muted);width:10px}
-details.acc[open]>summary::before{content:"▾"}
-details.acc>summary b{color:var(--ink);font-weight:600}
-details.acc>summary .muted{font-size:12px}
-ol.outline{list-style:none;margin:0;padding:4px 14px 12px;font-size:13px}
-ol.outline li{padding:3px 0;border-bottom:1px solid #f1f5f9}
-ol.outline li.lv2{padding-left:22px}ol.outline li.lv3{padding-left:44px}ol.outline li.lv4{padding-left:66px;color:var(--muted)}
-.cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;padding:4px 14px 14px}
-.card{border:1px solid var(--line);border-radius:6px;padding:12px 14px;min-width:0}
-.card.yours{border-color:var(--accent);box-shadow:inset 3px 0 0 var(--accent)}
-.card.absent{background:var(--panel)}
-.card .ch{display:flex;justify-content:space-between;gap:10px;font-size:12px;margin-bottom:6px}
-.card .ch b{font-size:13px;color:var(--ink)}
-.card .hd{font-weight:600;color:var(--ink);margin-bottom:6px}
-.card .sum{font-size:12.5px;margin:0 0 8px;color:var(--text)}
-.card .sum span{display:inline-block;font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-right:6px}
-.card .text{font-size:12.5px;line-height:1.6;max-height:220px;overflow:auto;border-top:1px solid var(--line);padding-top:8px;white-space:pre-line}
-.card .sim{display:block;margin-top:8px;font-size:11.5px;color:var(--muted)}
-ol.faq{margin:0;padding:6px 18px 12px 40px}
-ol.faq li{padding:8px 0;border-bottom:1px solid #f1f5f9}
-ol.faq .q{margin:0 0 4px;font-weight:600;color:var(--ink)}
-ol.faq .a{margin:0;font-size:13px}
-@media (max-width:960px){.cards{grid-template-columns:1fr}.tree td.h{min-width:220px}}
-@media print{
- .scroll{max-height:none;overflow:visible}
- .card .text{max-height:none;overflow:visible}
- .cards{grid-template-columns:1fr 1fr}
- .card,details.acc li{break-inside:avoid}
- details.acc{border:0;border-top:1px solid var(--line);border-radius:0}
- details.acc>summary::before{content:none}
- .tree td.h{min-width:0}
-}
-
-main{counter-reset:sec}
-section{counter-increment:sec}
-h2 .n::before{content:counter(sec)}
-nav.toc{overflow:auto}
-.na{border:1px dashed var(--line2);border-radius:6px;padding:14px 16px;background:var(--panel);margin:0 0 14px}
-.na-h{font-weight:600;color:var(--ink);margin-bottom:4px}
-.na p{margin:4px 0}
-.gap{border:1px solid var(--line);border-radius:6px;margin:8px 0}
-.gap>summary{display:grid;grid-template-columns:80px 90px 1fr auto;gap:12px;align-items:baseline;padding:10px 14px;cursor:pointer;list-style:none}
-.gap>summary::-webkit-details-marker{display:none}
-.gap .body{padding:0 14px 12px 196px;font-size:13px}
-.gap .body p{margin:6px 0}
-.gap .body b{color:var(--ink)}
-.chips{display:flex;flex-wrap:wrap;gap:6px}
-.chip{border:1px solid var(--line2);border-radius:10px;padding:1px 9px;font-size:12px;white-space:nowrap}
-.struct{margin:0;padding:4px 14px 12px;list-style:none}
-.struct li{padding:8px 0;border-bottom:1px solid #f1f5f9}
-.struct li.lv2{padding-left:20px}.struct li.lv3{padding-left:40px}.struct li.lv4{padding-left:60px}
-.struct .t{font-weight:600;color:var(--ink)}
-.struct .x{font-size:12.5px;margin:4px 0 0;white-space:pre-line}
-.linktbl td{font-size:12px;overflow-wrap:anywhere}
-@media (max-width:960px){.gap>summary{grid-template-columns:70px 1fr}.gap>summary .sb{display:none}.gap .body{padding-left:14px}}
-@media print{.gap{border:0;border-top:1px solid var(--line);border-radius:0}.gap .body{padding-left:14px}}
-
-.kpis.k3{gap:1px;background:var(--line);grid-template-columns:repeat(3,minmax(0,1fr))}
-.kpis.k3 .kpi{background:var(--bg);border:0}
-.tbl.inner{margin:0 14px 12px;width:auto}
-@media (max-width:960px){.kpis.k3{grid-template-columns:repeat(2,minmax(0,1fr))}}
+CSS = """
+:root{--navy:#0A2F5C;--blue:#005BAA;--blue2:#3F8FD8;--sky:#EEF5FC;--sky2:#DCEAF8;--line:#DCE5F0;--ink:#1F2937;
+--muted:#5B6B80;--yellow:#E8A800;--ysoft:#FFF7DB;--good:#1E7F4F;--gbg:#E7F5EE;--ni:#9A6700;--nbg:#FFF4D6;--poor:#B42318;--pbg:#FDECEA;--side:290px}
+*{box-sizing:border-box}html{scroll-behavior:smooth;scroll-padding-top:16px}
+body{margin:0;background:#fff;color:var(--ink);font:15px/1.6 "Segoe UI",Calibri,Arial,sans-serif;-webkit-font-smoothing:antialiased}
+a{color:var(--blue);text-decoration:none}a:hover{text-decoration:underline}
+.side{position:fixed;inset:0 auto 0 0;width:var(--side);background:var(--sky);border-right:1px solid var(--line);overflow-y:auto;padding:22px 0 40px}
+.side .rt{padding:0 22px 16px;border-bottom:1px solid var(--line);margin-bottom:10px}
+.side .rt b{display:block;color:var(--navy);font-size:15px;line-height:1.35}.side .rt span{color:var(--muted);font-size:12.5px}
+.side h6{margin:16px 22px 4px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:600}
+.side a{display:flex;gap:10px;align-items:baseline;padding:6px 22px 6px 19px;color:var(--navy);font-size:14px;border-left:3px solid transparent}
+.side a .no{color:var(--muted);font-size:12px;min-width:18px}
+.side a:hover{background:var(--sky2);text-decoration:none}.side a.on{background:#fff;border-left-color:var(--yellow);font-weight:600}
+.side a.sub{padding-left:47px;font-size:13.5px}
+main{margin-left:var(--side);padding:0 48px 80px;max-width:calc(1240px + var(--side))}
+.top{padding:34px 0 22px;border-bottom:2px solid var(--sky2);margin-bottom:8px}
+.top .k{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--blue);font-weight:600}
+.top h1{margin:6px 0 6px;color:var(--navy);font-size:30px;line-height:1.25}
+.top p{margin:2px 0;color:var(--muted)}
+section{padding:30px 0 10px;border-bottom:1px solid var(--line)}section:last-of-type{border-bottom:0}
+h2{color:var(--navy);font-size:23px;margin:0 0 4px}h2 .n{color:var(--blue);margin-right:8px}
+.lede{color:var(--muted);margin:0 0 18px;max-width:900px}
+h3{color:var(--navy);font-size:17px;margin:26px 0 10px}h4{color:var(--navy);font-size:15px;margin:18px 0 8px}
+.tw{overflow-x:auto;border:1px solid var(--line);border-radius:8px;margin:8px 0 16px}
+table{border-collapse:collapse;width:100%;font-size:14px}
+th,td{padding:9px 12px;border-bottom:1px solid var(--line);vertical-align:top;text-align:left}
+thead th{background:var(--navy);color:#fff;font-weight:600;font-size:13px;position:sticky;top:0;z-index:1}
+thead th.us{background:var(--blue);box-shadow:inset 0 -3px 0 var(--yellow)}
+table.cmp{table-layout:fixed}table.cmp th:first-child{width:26%}table.cmp th.xtra{width:9%}
+tbody tr:nth-child(even) td{background:#FAFCFE}tbody tr:last-child td{border-bottom:0}
+td.lab{font-weight:600;color:var(--navy);background:var(--sky)!important;overflow-wrap:anywhere}
+td.us{background:var(--ysoft)!important}td.c,th.c{text-align:center}td.num{text-align:right;font-variant-numeric:tabular-nums}
+.small{font-size:12.5px;color:var(--muted)}.mono{font-family:Consolas,"Courier New",monospace;font-size:12px;word-break:break-all}
+.pill{display:inline-block;padding:1px 9px;border-radius:999px;font-size:12px;font-weight:600;white-space:nowrap}
+.good{background:var(--gbg);color:var(--good)}.ni{background:var(--nbg);color:var(--ni)}.poor{background:var(--pbg);color:var(--poor)}
+.na{background:#F1F4F8;color:var(--muted)}.blue{background:var(--sky2);color:var(--navy)}
+.us-tag{display:inline-block;margin-left:6px;padding:0 7px;border-radius:4px;background:var(--yellow);color:#3A2A00;font-size:10.5px;font-weight:700;letter-spacing:.04em;vertical-align:2px}
+.d3{background:var(--blue)!important;color:#fff;font-weight:600}.d2{background:#BFD7F1!important;color:var(--navy)}
+.d1{background:var(--sky2)!important;color:var(--navy)}.d0{color:#9AA7B6}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin:6px 0 18px}
+.card{border:1px solid var(--line);border-radius:10px;padding:14px 16px;background:#fff}
+.card .v{font-size:26px;font-weight:700;color:var(--navy);line-height:1.2}.card .l{font-size:13px;color:var(--muted)}
+.card.us{border-color:var(--yellow);background:var(--ysoft)}
+.obs{margin:6px 0 18px;padding:0;list-style:none}.obs li{padding:9px 14px;border-left:3px solid var(--blue);background:var(--sky);margin:0 0 8px;border-radius:0 6px 6px 0}
+.tools{display:flex;flex-wrap:wrap;gap:8px;margin:4px 0 12px}
+.btn{border:1px solid var(--line);background:#fff;color:var(--navy);padding:5px 12px;border-radius:6px;font:inherit;font-size:13px;cursor:pointer}
+.btn.on,.btn:hover{background:var(--navy);color:#fff;border-color:var(--navy)}
+input.q{border:1px solid var(--line);border-radius:6px;padding:6px 10px;font:inherit;font-size:13.5px;min-width:280px}
+details.topic{border:1px solid var(--line);border-radius:10px;margin:0 0 12px;background:#fff}
+details.topic>summary{cursor:pointer;list-style:none;padding:12px 16px;display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+details.topic>summary::-webkit-details-marker{display:none}
+details.topic>summary b{color:var(--navy);font-size:15.5px;margin-right:auto}
+details.topic[open]>summary{border-bottom:1px solid var(--line);background:var(--sky);border-radius:10px 10px 0 0}
+.chip{font-size:11.5px;padding:1px 8px;border-radius:4px;border:1px solid var(--line)}
+.row{display:grid;grid-template-columns:200px 1fr;gap:18px;padding:14px 16px;border-bottom:1px solid var(--line)}.row:last-child{border-bottom:0}
+.row.us{background:var(--ysoft)}.row .who b{color:var(--navy);display:block}.row .who .small{display:block;margin-top:2px}
+.sum{margin:0 0 10px;color:var(--ink)}.cap{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:600;margin:0 0 3px}.quote{margin:0;padding:10px 14px;background:#F7FAFD;border:1px solid var(--line);border-radius:6px;font-size:14px;white-space:pre-line}
+.quote.more{margin-top:6px}.nc{color:var(--muted);font-style:italic}
+details.more>summary{cursor:pointer;color:var(--blue);font-size:13px;margin-top:6px}
+.grid5{display:grid;grid-template-columns:repeat(5,minmax(200px,1fr));gap:12px;overflow-x:auto}
+.col{border:1px solid var(--line);border-radius:8px;padding:10px 12px;min-width:200px}.col.us{border-color:var(--yellow);background:var(--ysoft)}
+.col h4{margin:0 0 8px}
+.ol{list-style:none;margin:0;padding:0}.ol li{padding:3px 0;font-size:13.5px;display:flex;gap:8px}
+.tag{flex:none;font-size:10.5px;font-weight:700;padding:1px 5px;border-radius:3px;background:var(--sky2);color:var(--navy);height:fit-content;margin-top:2px}
+.tag.h1{background:var(--navy);color:#fff}.tag.h2{background:var(--blue);color:#fff}
+.ol li.l3{padding-left:18px}.ol li.l4{padding-left:36px}.ol li.l5,.ol li.l6{padding-left:54px}
+.pg-head{display:flex;flex-wrap:wrap;gap:8px 18px;align-items:baseline;margin-bottom:6px}
+.kv{display:grid;grid-template-columns:190px 1fr;border:1px solid var(--line);border-radius:8px;overflow:hidden;margin:8px 0 16px}
+.kv div{padding:8px 12px;border-bottom:1px solid var(--line)}.kv div:nth-child(odd){background:var(--sky);font-weight:600;color:var(--navy)}
+.kv div:nth-last-child(-n+2){border-bottom:0}
+.sec{margin:0 0 14px;padding:0 0 12px;border-bottom:1px dashed var(--line)}.sec:last-child{border-bottom:0}
+.sec h5{margin:0 0 6px;font-size:15px;color:var(--navy);display:flex;gap:8px;align-items:baseline}
+.sec p{margin:0;max-width:980px;white-space:pre-line}
+.faq{border:1px solid var(--line);border-radius:8px;margin:0 0 8px}.faq summary{cursor:pointer;padding:9px 14px;font-weight:600;color:var(--navy)}
+.faq div{padding:0 14px 12px;max-width:980px}
+.cols2{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:14px}
+ul.plain{margin:6px 0 0;padding-left:18px}ul.plain li{margin:0 0 4px}
+.foot{margin-top:40px;color:var(--muted);font-size:12.5px}
+.menu{display:none}
+@media (max-width:980px){.side{position:static;width:auto;border-right:0;border-bottom:1px solid var(--line);max-height:none}
+main{margin-left:0;padding:0 16px 60px}.row{grid-template-columns:1fr}.kv{grid-template-columns:1fr}}
+@media print{.side,.tools,.menu{display:none!important}main{margin:0;padding:0;max-width:none}details{break-inside:avoid}
+thead th{position:static}section{break-before:page}a{color:var(--ink)}}
 """
 
-JS = r"""
-function flt(b,id){[...b.parentNode.children].forEach(x=>x.setAttribute("aria-pressed",x===b));var t=document.getElementById(id);t.dataset.f=b.dataset.f;apply(t)}
-function srch(i,id){var t=document.getElementById(id);t.dataset.q=i.value.toLowerCase();apply(t)}
-function apply(t){var f=t.dataset.f||"all",q=t.dataset.q||"";t.querySelectorAll("tbody tr").forEach(r=>{var ok=(f=="all")||(f=="miss"&&r.dataset.you=="0"&&+r.dataset.n>=1)||(f=="shared"&&+r.dataset.n>=2);if(q&&!r.textContent.toLowerCase().includes(q))ok=false;r.hidden=!ok})}
-function accAll(sel,open){document.querySelectorAll(sel+" details").forEach(d=>d.open=open)}
-function dev(b,k){[...b.parentNode.children].forEach(x=>x.setAttribute("aria-pressed",x===b));document.querySelectorAll("[data-view]").forEach(e=>e.hidden=e.dataset.view!==k)}
+JS = """
+(function(){
+var links=[].slice.call(document.querySelectorAll('.side a[href^="#"]'));
+var map={};links.forEach(function(a){map[a.getAttribute('href').slice(1)]=a;});
+var obs=new IntersectionObserver(function(es){es.forEach(function(e){if(e.isIntersecting){
+links.forEach(function(a){a.classList.remove('on');});var a=map[e.target.id];if(a)a.classList.add('on');}});},{rootMargin:'0px 0px -70% 0px'});
+document.querySelectorAll('section[id]').forEach(function(s){obs.observe(s);});
+})();
+function filt(btn,grp,val){document.querySelectorAll('[data-grp="'+grp+'"] .btn').forEach(function(b){b.classList.remove('on');});btn.classList.add('on');
+document.querySelectorAll('[data-'+grp+']').forEach(function(el){var t=el.getAttribute('data-'+grp).split(' ');el.style.display=(val==='all'||t.indexOf(val)>=0)?'':'none';});}
+function accAll(sel,open){document.querySelectorAll(sel+' details.topic').forEach(function(d){d.open=open;});}
+function search(inp,tbl){var q=inp.value.toLowerCase();document.querySelectorAll('#'+tbl+' tbody tr').forEach(function(r){r.style.display=r.textContent.toLowerCase().indexOf(q)>=0?'':'none';});}
 """
 
 
-# ----------------------------------------------------------------- formatting
-def fms(v):
+# ----------------------------------------------------------------------------- helpers
+def _int(v, d=0):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return d
+
+
+def _host(url):
+    h = (urlparse(url or "").netloc or "").lower()
+    return h[4:] if h.startswith("www.") else h
+
+
+def _ms(v):
+    return "—" if v is None else (f"{v / 1000:.1f} s" if v >= 1000 else f"{int(v)} ms")
+
+
+def _metric(key, v):
     if v is None:
         return "—"
-    return f"{v / 1000:.1f} s" if v >= 1000 else f"{int(v)} ms"
+    if key == "cls":
+        return f"{v:.3f}"
+    if key == "bytes":
+        return f"{v / 1048576:.1f} MB"
+    return _ms(v)
 
 
-def fcls(v):
-    return "—" if v is None else f"{v:.2f}"
+def _pill(text, cls):
+    return f'<span class="pill {cls}">{esc(text)}</span>'
 
 
-def fnum(v):
-    return "—" if v is None else f"{v:,}"
+# Legal / regulatory boilerplate (disclaimers, fraud warnings, UIN lists) is never quoted as a
+# page's coverage of a topic, and form pickers ("4 5 6 ... 82") are not prose.
+_LEGAL = re.compile(r"IRDAI|\bUIN\b|risk factors|beware|spurious|fictitious|terms (?:and|&) conditions|"
+                    r"disclaimer|formerly known as|registered office|\bCIN\b|trade ?logo", re.I)
+_NUM_RUN = re.compile(r"(?:\b\d{1,3}\b[\s,]+){8,}")
 
 
-def mark(value_text, status):
-    return f'<span class="m{" m-" + status if status in ("ni", "poor") else ""}">{value_text}</span>'
+def _sec_text(sec):
+    if not sec:
+        return ""
+    t = sec.get("spa_model_text") or clean_text(sec.get("text") or "") or ""
+    return re.sub(r"\s{2,}", " ", _NUM_RUN.sub(" … ", t)).strip()
 
 
-def dot(status):
-    return f'<span class="st st-{status or "na"}"><i></i>{STATUS.get(status, "")}</span>'
+def _quotable(sec):
+    """A section whose text can stand for a page's coverage of a topic (not legal boilerplate)."""
+    if not sec:
+        return False
+    blob = (sec.get("heading") or "") + " " + (sec.get("text") or "")[:1500]
+    return len(_LEGAL.findall(blob)) < 3
 
 
-class H:
-    """Small builder that keeps per-report state (brand order, your brand)."""
-
+class R:
     def __init__(self, ctx, print_mode):
         self.c, self.p = ctx, print_mode
-        self.order, self.your = ctx["order"], ctx["your"]
-        self.o = []
+        self.meta = ctx["meta"]
+        self.order, self.you, self.pages = ctx["order"], ctx["your"], ctx["pages"]
+        self.names = self.meta.get("display_names") or {}
+        self.out = []
 
     def A(self, s):
-        self.o.append(s)
+        self.out.append(s)
 
-    def you(self, b):
-        return " you" if b == self.your else ""
+    def name(self, b):
+        return self.names.get(b, b)
 
-    def trc(self, b):
-        return f' class="you"' if b == self.your else ""
+    def label(self, b):
+        return esc(self.name(b)) + ('<span class="us-tag">OUR PAGE</span>' if b == self.you else "")
 
-    def th_brands(self, cls="c"):
-        return "".join(f'<th class="{cls}{self.you(b)}">{esc(b)}{"<em>Your page</em>" if b == self.your else ""}</th>' for b in self.order)
+    def th(self, extra_first=None):
+        cells = [f'<th>{esc(extra_first)}</th>'] if extra_first is not None else []
+        return "".join(cells) + "".join(f'<th class="c{" us" if b == self.you else ""}">{esc(self.name(b))}</th>' for b in self.order)
 
-    def yes(self, v, b):
-        return f'<td class="c{self.you(b)}">{"<span class=yes>✓</span>" if v else "<span class=no>—</span>"}</td>'
+    def td(self, b, html_, cls="c"):
+        return f'<td class="{cls}{" us" if b == self.you else ""}">{html_}</td>'
 
-    def section(self, id_, title, lede="", pb=True):
-        self.A(f'<section id="{id_}"{" class=pb" if pb else ""}><h2><span class="n"></span>{title}</h2>'
-               + (f'<p class="lede">{lede}</p>' if lede else ""))
+    def section(self, sid, num, title, lede=""):
+        self.A(f'<section id="{sid}"><h2><span class="n">{num}</span>{esc(title)}</h2>' + (f'<p class="lede">{lede}</p>' if lede else ""))
 
-    def unavailable(self, what, will_show):
-        self.A(f'<div class="na"><div class="na-h">Not available yet</div><p>{what}</p>'
-               f'<p class="muted">When connected, this section shows: {will_show}</p></div>')
+    def end(self):
+        self.A("</section>")
 
-    def filterbar(self, target, opts):
-        btns = "".join(f'<button aria-pressed="{"true" if i == 0 else "false"}" data-f="{k}" onclick="flt(this,\'{target}\')">{esc(l)}</button>'
-                       for i, (k, l) in enumerate(opts))
-        self.A(f'<div class="tools noprint"><div class="seg" role="group">{btns}</div>'
-               f'<input class="search" type="search" placeholder="Search…" aria-label="Search" oninput="srch(this,\'{target}\')"></div>')
-
-    def details(self, summary_html, body_html):
-        self.A(f'<details class="acc"{" open" if self.p else ""}><summary>{summary_html}</summary>{body_html}</details>')
+    def pid(self, b):
+        return "page-" + (re.sub(r"[^a-z0-9]+", "-", self.name(b).lower()).strip("-") or "x")
 
 
-# ====================================================================== render
-def render(ctx, print_mode=False):
-    h = H(ctx, print_mode)
-    A = h.A
-    c = ctx
-    order, your, pages, topic = c["order"], c["your"], c["pages"], c["topic"]
-    kpi, qual = c["kpis"], c["quality"]
-    today = date.today().strftime("%d %b %Y")
-
-    A('<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
-      f'<title>SEO Competitive Audit</title><style>{CSS}</style></head><body><div class="wrap">')
-    toc = [("summary", "Executive summary"), ("speed", "Page speed &amp; Core Web Vitals"), ("tech", "Technical &amp; on-page SEO"),
-           ("keywords", "Keywords"), ("visibility", "Search visibility &amp; authority"), ("headings", "Heading structure"),
-           ("topics", "Topic coverage &amp; gaps"), ("content", "Content by topic"), ("faqs", "FAQs"),
-           ("links", "Links &amp; images"), ("actions", "Recommendations"), ("method", "Method &amp; data sources")]
-    A('<nav class="toc" aria-label="Contents"><div class="brand">SEO Competitive Audit</div><ol>'
-      + "".join(f'<li><a href="#{i}">{t}</a></li>' for i, t in toc)
-      + '</ol><div class="dl"><a href="report.xlsx">Download XLSX</a><a href="report.pdf">Download PDF</a></div></nav><main>')
-    A(f'<header class="cover"><div class="eyebrow">SEO Competitive Audit · {esc((c["meta"].get("page_type") or "").title())} page</div>'
-      f'<h1>{esc(topic[:1].upper() + topic[1:])}: {esc(your)} vs {len(order) - 1} competitors</h1><div class="meta">'
-      f'<div><span>Page audited</span><b>{esc((pages[your].get("url") or "").replace("https://", ""))}</b></div>'
-      f'<div><span>Market</span><b>{esc(c["meta"].get("market") or "India")} · Google</b></div>'
-      f'<div><span>Competitors</span><b>{esc(", ".join(order[1:]))}</b></div>'
-      f'<div><span>Report date</span><b>{today}</b></div></div></header>')
-
-    summary(h, today)
-    speed(h)
-    technical(h)
-    keywords(h)
-    visibility(h)
-    headings(h)
-    topics(h)
-    content(h)
-    faqs(h)
-    links(h)
-    actions(h)
-    method(h)
-    A(f'<footer>SEO Content-Gap Analyzer · run: {esc(c["run_name"])} · generated {today}</footer></main></div><script>{JS}</script></body></html>')
-    return "".join(h.o)
-
-
-# -------------------------------------------------------------------- sections
-def _psi(h, b, device):
-    r = (h.c["psi_by"].get(b) or {}).get(device) or {}
-    return r if r and not r.get("error") else None
-
-
-def summary(h, today):
-    c, A = h.c, h.A
-    your, order, kpi, qual = c["your"], c["order"], c["kpis"], c["quality"]
-    ra = (c["gaps"].get("ranking_assessment") or {}).get(your) or {}
-    h.section("summary", "Executive summary", esc(ra.get("google") or ""), pb=False)
-    tiles = []
-    tiles.append(("Content coverage", f'{kpi.get("coverage_pct", "—")}%', f'{kpi.get("missing_count", 0)} topics missing · {kpi.get("thin_count", 0)} thin'))
-    if qual:
-        ranked = sorted(qual, key=lambda b: -((qual[b] or {}).get("quality_score") or 0))
-        pos = next((i + 1 for i, b in enumerate(ranked) if b.lower() == your.lower()), None)
-        tiles.append(("Content quality", f'{(qual.get(your) or {}).get("quality_score", "—")}<small> / 100</small>', f"Rank {pos} of {len(ranked)} pages" if pos else ""))
-    m = _psi(h, your, "mobile")
-    if m:
-        f = m.get("field") or {}
-        cat = FIELD_CATEGORY.get(f.get("overall_category") or "", "")
-        scope = "site-wide" if f.get("origin_fallback") else "this page"
-        tiles.append(("Core Web Vitals (mobile)", STATUS[cat] if cat else "No data",
-                      (f'Real users, {scope}: LCP {fms(f.get("lcp_ms"))} · INP {fms(f.get("inp_ms"))} · CLS {fcls(f.get("cls"))}') if cat
-                      else "Not enough Chrome traffic for real-user data"))
-        scores = sorted(((_psi(h, b, "mobile") or {}).get("scores", {}).get("performance") for b in order), key=lambda x: -(x or -1))
-        mine = m["scores"].get("performance")
-        tiles.append(("Mobile performance", f'{mine}<small> / 100</small>', f"Lab test · rank {scores.index(mine) + 1} of {len(order)}" if mine is not None else ""))
+# ----------------------------------------------------------------------------- data shaping
+def serp_queries(c):
+    """[(query, [ {rank, domain, url} ])] from ranking.json (v0.7) or serp.json (per_query)."""
+    rk = c.get("ranking") or {}
+    if rk.get("per_query"):
+        src = rk
     else:
-        tiles.append(("Page speed", "Not available", "PageSpeed Insights not run"))
-    a = c["auth_by"].get(your)
-    if a:
-        comp_rd = median([(c["auth_by"].get(b) or {}).get("refdomains") for b in order[1:]])
-        tiles.append(("Authority (Ahrefs)", f'UR {a.get("url_rating", "—")}',
-                      f'{fnum(a.get("refdomains"))} referring domains · competitor median {fnum(round(comp_rd)) if comp_rd is not None else "—"}'))
-        tiles.append(("Organic keywords (Ahrefs)", fnum(a.get("org_keywords")), f'{fnum(a.get("org_keywords_top3"))} in top 3 · ~{fnum(a.get("org_traffic"))} visits / month'))
-    else:
-        tiles.append(("Authority", "Not available", "Ahrefs not connected"))
-    rk = (c["ranking"].get("our_ranking") or {})
-    if len(tiles) < 6:
-        tiles.append(("Google ranking (web search)", f'#{rk.get("best_position")}' if rk.get("found") else "Not ranked",
-                      f'Across {len(c["ranking"].get("queries_used") or [])} target queries checked'))
-    A('<div class="kpis k3">' + "".join(f'<div class="kpi"><div class="l">{l}</div><div class="v">{v}</div><div class="s">{s}</div></div>' for l, v, s in tiles) + '</div>')
-    A('<h3>Highest-priority gaps</h3><ul class="findings">')
-    for g in [g for g in c["gap_list"] if int(g.get("priority") or 0) == 3][:6]:
-        A(f'<li><b>{esc((g.get("type") or "").title())}</b><span>{esc(g.get("title"))}</span></li>')
-    A('</ul></section>')
+        src = _load(os.path.join(c["run_dir"], "serp.json"), {}) or {}
+        if not src.get("per_query"):
+            src = rk
+    if src.get("per_query"):
+        return [(q.get("query") or "", q.get("results") or []) for q in src["per_query"]]
+    groups = {}
+    for r in src.get("ranking_pages") or []:
+        groups.setdefault(r.get("query") or "", []).append(r)
+    return list(groups.items())
 
 
-def speed(h):
-    c, A = h.c, h.A
-    order, your, psi = c["order"], c["your"], c["psi"]
-    h.section("speed", "Page speed &amp; Core Web Vitals")
-    if not psi:
-        h.unavailable("Google PageSpeed Insights was not run for this report.",
-                      "Core Web Vitals from real Chrome users (LCP, INP, CLS) and Lighthouse lab metrics for mobile and desktop, "
-                      "Lighthouse accessibility / best-practice / SEO scores, and the top fixes for your page.")
-        A('</section>')
-        return
-    A(f'<p class="lede">Google PageSpeed Insights, measured {esc((psi.get("fetched_at") or "")[:10])}. '
-      '<b>Real users</b> are Chrome UX Report 75th-percentile values over the last 28 days — the numbers Google uses for ranking. '
-      '<b>Lab</b> is a single Lighthouse test on a throttled device, useful for diagnosing causes. Values outside Google’s thresholds are marked.</p>')
-    A('<div class="seg noprint" role="group" aria-label="Device"><button aria-pressed="true" onclick="dev(this,\'mobile\')">Mobile</button>'
-      '<button aria-pressed="false" onclick="dev(this,\'desktop\')">Desktop</button></div><div class="both">')
-    for device in ("mobile", "desktop"):
-        A(f'<div data-view="{device}"{" hidden" if device == "desktop" else ""}><h3 class="printonly">{device.title()}</h3>')
-        A('<h3>Real-user Core Web Vitals</h3><div class="tbl"><table><thead><tr><th>Page</th><th>Assessment</th>'
-          '<th class="num">LCP<em>≤ 2.5 s</em></th><th class="num">INP<em>≤ 200 ms</em></th><th class="num">CLS<em>≤ 0.10</em></th>'
-          '<th class="num">FCP<em>≤ 1.8 s</em></th><th class="num">TTFB<em>≤ 0.8 s</em></th><th>Data scope</th></tr></thead><tbody>')
-        for b in order:
-            r = (c["psi_by"].get(b) or {}).get(device) or {}
-            if r.get("error") or not r:
-                A(f'<tr{h.trc(b)}><td>{esc(b)}</td><td colspan="7" class="muted">Not measured: {esc((r.get("error") or "no result")[:120])}</td></tr>')
-                continue
-            f = r.get("field") or {}
-            if not f.get("has_data"):
-                A(f'<tr{h.trc(b)}><td>{esc(b)}</td><td colspan="7" class="muted">Not enough Chrome traffic for real-user data — see lab results</td></tr>')
-                continue
-            cat = FIELD_CATEGORY.get(f.get("overall_category") or "", "")
-            A(f'<tr{h.trc(b)}><td>{esc(b)}</td><td>{dot(cat)}</td>'
-              f'<td class="num">{mark(fms(f.get("lcp_ms")), rate("lcp_ms", f.get("lcp_ms")))}</td>'
-              f'<td class="num">{mark(fms(f.get("inp_ms")), rate("inp_ms", f.get("inp_ms")))}</td>'
-              f'<td class="num">{mark(fcls(f.get("cls")), rate("cls", f.get("cls")))}</td>'
-              f'<td class="num">{mark(fms(f.get("fcp_ms")), rate("fcp_ms", f.get("fcp_ms")))}</td>'
-              f'<td class="num">{mark(fms(f.get("ttfb_ms")), rate("ttfb_ms", f.get("ttfb_ms")))}</td>'
-              f'<td>{"Site-wide (page has too little traffic)" if f.get("origin_fallback") else "This page"}</td></tr>')
-        A('</tbody></table></div>')
-        A('<h3>Lab test (Lighthouse)</h3><div class="tbl"><table><thead><tr><th>Page</th><th class="num">Performance</th>'
-          '<th class="num">LCP<em>≤ 2.5 s</em></th><th class="num">CLS<em>≤ 0.10</em></th><th class="num">TBT<em>≤ 200 ms</em></th>'
-          '<th class="num">FCP<em>≤ 1.8 s</em></th><th class="num">Speed Index<em>≤ 3.4 s</em></th><th class="num">Page weight</th>'
-          '<th class="num">Accessibility</th><th class="num">Best practices</th><th class="num">SEO</th></tr></thead><tbody>')
-        for b in order:
-            r = _psi(h, b, device)
-            if not r:
-                A(f'<tr{h.trc(b)}><td>{esc(b)}</td><td colspan="10" class="muted">Not measured</td></tr>')
-                continue
-            lab, sc = r.get("lab") or {}, r.get("scores") or {}
-            A(f'<tr{h.trc(b)}><td>{esc(b)}</td><td class="num">{mark(sc.get("performance", "—"), rate("score", sc.get("performance")))}</td>'
-              f'<td class="num">{mark(fms(lab.get("lcp_ms")), rate("lcp_ms", lab.get("lcp_ms")))}</td>'
-              f'<td class="num">{mark(fcls(lab.get("cls")), rate("cls", lab.get("cls")))}</td>'
-              f'<td class="num">{mark(fms(lab.get("tbt_ms")), rate("tbt_ms", lab.get("tbt_ms")))}</td>'
-              f'<td class="num">{mark(fms(lab.get("fcp_ms")), rate("fcp_ms", lab.get("fcp_ms")))}</td>'
-              f'<td class="num">{mark(fms(lab.get("si_ms")), rate("si_ms", lab.get("si_ms")))}</td>'
-              f'<td class="num">{(lab.get("bytes") or 0) / 1048576:.1f} MB</td>'
-              + "".join(f'<td class="num">{mark(sc.get(k, "—"), rate("score", sc.get(k)))}</td>' for k in ("accessibility", "best-practices", "seo"))
-              + '</tr>')
-        A('</tbody></table></div>')
-        r = _psi(h, your, device)
-        if r and r.get("fixes"):
-            A(f'<h3>Top fixes for your page ({device})</h3><div class="tbl"><table><thead><tr><th>Lighthouse finding</th>'
-              '<th>Metrics affected</th><th class="num">Est. saving</th><th>Detail</th></tr></thead><tbody>')
-            for fx in r["fixes"][:8]:
-                A(f'<tr><td>{esc(fx.get("title"))}</td><td>{esc(", ".join(fx.get("metrics") or []))}</td>'
-                  f'<td class="num">{fms(fx.get("savings_ms")) if fx.get("savings_ms") else "—"}</td><td>{esc(fx.get("display") or "")}</td></tr>')
-            A('</tbody></table></div>')
-        A('</div>')
-    A('</div><div class="legend"><span>' + dot("good") + '</span><span>' + dot("ni") + '</span><span>' + dot("poor") + '</span>'
-      '<span>INP exists only in real-user data; Lighthouse lab tests cannot measure it.</span></div></section>')
+def brand_domains(c):
+    meta, out = c["meta"], {}
+    out[c["your"]] = {_host(meta.get("your_url"))} | set(meta.get("your_domains") or [])
+    for comp in meta.get("competitors") or []:
+        out[comp.get("brand")] = {_host(comp.get("url")), _host(comp.get("user_supplied_url"))} | set(comp.get("domains") or [])
+    return {b: {d for d in ds if d} for b, ds in out.items()}
 
 
-def technical(h):
-    c, A = h.c, h.A
-    order, pages, qual = c["order"], c["pages"], c["quality"]
-    h.section("tech", "Technical &amp; on-page SEO", "Checks from the raw HTML of each page. Values outside recommended ranges are marked.")
-    A('<div class="tbl"><table class="mx"><thead><tr><th>Check</th>' + h.th_brands("num") + '</tr></thead><tbody>')
-
-    def row(label, hint, fn, rule=lambda v: ""):
-        cells = []
-        for b in order:
-            v = fn(b)
-            cells.append(f'<td class="num{h.you(b)}">{mark(esc(v) if v is not None else "—", rule(v) if v is not None else "")}</td>')
-        A(f'<tr><td class="rowh">{label}{f"<small>{hint}</small>" if hint else ""}</td>{"".join(cells)}</tr>')
-
-    P = lambda b: pages[b]
-    row("Title length", "50–60 chars", lambda b: len(P(b).get("title") or ""), lambda v: "ni" if v > 60 or v < 30 else "")
-    row("Meta description", "120–160 chars", lambda b: len(P(b).get("meta_description") or ""), lambda v: "ni" if v > 160 or v < 70 else "")
-    row("H1 count", "exactly 1", lambda b: c["hcounts"][b][1], lambda v: "poor" if v != 1 else "")
-    row("H2 / H3 / H4", "", lambda b: "{} / {} / {}".format(*[c["hcounts"][b][l] for l in (2, 3, 4)]))
-    row("Visible words", "", lambda b: f'{int(P(b).get("word_count_total") or 0):,}')
-    row("Tables", "", lambda b: P(b).get("tables_count"))
-    row("Images", "", lambda b: P(b).get("image_count"))
-    row("Images missing alt", "", lambda b: max(0, int(P(b).get("image_count") or 0) - int(P(b).get("image_alt_count") or 0)), lambda v: "ni" if v > 0 else "")
-    row("Structured-data types", "JSON-LD", lambda b: len(P(b).get("schema_types") or []))
-    row("FAQPage schema", "", lambda b: "Yes" if "FAQPage" in (P(b).get("schema_types") or []) else "No", lambda v: "ni" if v == "No" else "")
-    row("Named author", "E-E-A-T", lambda b: "Yes" if P(b).get("author") else "No", lambda v: "ni" if v == "No" else "")
-    row("Named reviewer", "E-E-A-T", lambda b: "Yes" if P(b).get("reviewer") else "No")
-    row("Last updated date", "", lambda b: P(b).get("modified_date") or P(b).get("published_date") or "Not shown", lambda v: "ni" if v == "Not shown" else "")
-    row("Internal links", "in article body", lambda b: internal_link_count(P(b), qual))
-    row("External links", "", lambda b: P(b).get("external_link_count"))
-    if c["psi_by"]:
-        row("Lighthouse SEO score", "mobile", lambda b: ((_psi(h, b, "mobile") or {}).get("scores") or {}).get("seo"), lambda v: rate("score", v))
-        row("Server response (lab)", "≤ 0.8 s", lambda b: fms(((_psi(h, b, "mobile") or {}).get("lab") or {}).get("ttfb_ms")))
-    A('</tbody></table></div>')
-    A('<h3>Structured data types</h3><div class="tbl"><table><thead><tr><th>Page</th><th>Schema.org types (JSON-LD)</th></tr></thead><tbody>')
-    for b in order:
-        A(f'<tr{h.trc(b)}><td class="nowrap">{esc(b)}</td><td><div class="chips">'
-          + "".join(f'<span class="chip">{esc(t)}</span>' for t in pages[b].get("schema_types") or []) + '</div></td></tr>')
-    A('</tbody></table></div>')
-    if qual:
-        A('<h3>Content quality signals</h3><div class="tbl"><table><thead><tr><th>Page</th><th class="num">Quality score</th><th class="num">Words</th>'
-          '<th class="num">FAQs</th><th class="num">Tables</th><th>E-E-A-T</th><th>Freshness</th></tr></thead><tbody>')
-        from report_core import map_get
-        for b in order:
-            q = map_get(qual, b, {}) or {}
-            A(f'<tr{h.trc(b)}><td class="nowrap">{esc(b)}</td><td class="num">{q.get("quality_score", "—")}</td>'
-              f'<td class="num">{int(q.get("word_count") or 0):,}</td><td class="num">{q.get("faqs", "—")}</td><td class="num">{q.get("tables", "—")}</td>'
-              f'<td>{"Yes" if q.get("eeat") else "No"}</td><td>{esc(q.get("freshness") or "")}</td></tr>')
-        A('</tbody></table></div>')
-        if c["kpis"].get("word_count_note"):
-            A(f'<p class="note">{esc(c["kpis"]["word_count_note"])}</p>')
-    A('</section>')
+def page_kind(url):
+    u = (url or "").lower()
+    if re.search(r"blog|insurance-guide|knowledge|article|/guide", u):
+        return "article"
+    if "calculator" in u:
+        return "calculator"
+    return "page"
 
 
-def keywords(h):
-    c, A = h.c, h.A
-    order, pages, topic = c["order"], c["pages"], c["topic"]
-    h.section("keywords", "Keywords", f'How the target phrase <b>“{esc(topic)}”</b> is used in the elements search engines weigh most. '
-                                      '✓ = every word of the phrase appears.')
-    kc = {b: keyword_checks(pages[b], topic) for b in order}
-    A('<div class="tbl"><table class="mx"><thead><tr><th>Placement</th>' + h.th_brands() + '</tr></thead><tbody>')
-    for label, key in (("Title tag", "title"), ("Meta description", "meta"), ("H1", "h1"), ("URL", "url"), ("First 100 words", "first100")):
-        A(f'<tr><td class="rowh">{label}</td>' + "".join(h.yes(kc[b][key], b) for b in order) + '</tr>')
-    A('<tr><td class="rowh">H2/H3 headings containing it</td>' + "".join(f'<td class="c{h.you(b)}">{kc[b]["subheads"]} of {kc[b]["subheads_total"]}</td>' for b in order) + '</tr>')
-    A('<tr><td class="rowh">Exact phrase in body</td>' + "".join(f'<td class="c{h.you(b)}">{kc[b]["exact_body"]}</td>' for b in order) + '</tr>')
-    A('<tr><td class="rowh">Exact phrase per 1,000 words</td>' + "".join(f'<td class="c{h.you(b)}">{kc[b]["per_1000"]}</td>' for b in order) + '</tr>')
-    A('</tbody></table></div>')
-    A('<h3>Title, meta description and H1 (verbatim)</h3><div class="tbl"><table><thead><tr><th>Page</th><th>Title</th><th>Meta description</th><th>H1</th></tr></thead><tbody>')
-    for b in order:
-        p = pages[b]
-        t, d = p.get("title") or "", p.get("meta_description") or ""
-        A(f'<tr{h.trc(b)}><td class="nowrap">{esc(b)}</td><td>{esc(t)}<small class="muted"> · {len(t)} chars</small></td>'
-          f'<td>{esc(d)}<small class="muted"> · {len(d)} chars</small></td><td>{esc(p.get("h1") or "—")}</td></tr>')
-    A('</tbody></table></div>')
-    auth = c["auth_by"]
-    A('<h3>Ranking keywords by page (Ahrefs)</h3>')
-    if auth:
-        vol, pos = {}, {}
-        for b in order:
-            for k in (auth.get(b) or {}).get("top_keywords") or []:
-                kw = k.get("keyword")
-                vol[kw] = max(vol.get(kw) or 0, k.get("volume") or 0)
-                pos[(kw, b)] = k.get("position")
-        kws = sorted(vol, key=lambda k: -vol[k])[:25]
-        if kws:
-            A(f'<p class="note" style="margin-top:-4px">Google {esc((c["auth"] or {}).get("country", ""))} positions for keywords each page ranks for (lower is better); — = not ranking. '
-              'Volume = monthly searches.</p><div class="tbl"><table class="mx"><thead><tr><th>Keyword</th><th class="num">Volume</th>' + h.th_brands() + '</tr></thead><tbody>')
-            for k in kws:
-                A(f'<tr><td>{esc(k)}</td><td class="num">{fnum(vol[k])}</td>' + "".join(f'<td class="c{h.you(b)}">{pos.get((k, b)) or "<span class=no>—</span>"}</td>' for b in order) + '</tr>')
-            A('</tbody></table></div>')
-        else:
-            A('<p class="note">None of these pages ranks for any keyword in Ahrefs’ index yet.</p>')
-    else:
-        h.unavailable("Ahrefs was not connected for this report.", "the keywords each page ranks for, with Google position and monthly search volume.")
-    qs, best = serp_matrix(c["ranking"])
-    if qs:
-        A('<h3>Search ranking by query (web search)</h3><div class="tbl"><table class="mx"><thead><tr><th>Query</th>' + h.th_brands() + '</tr></thead><tbody>')
-        for q in qs:
-            A(f'<tr><td>{esc(q)}</td>' + "".join(f'<td class="c{h.you(b)}">{best.get((q, b)) or "<span class=no>—</span>"}</td>' for b in order) + '</tr>')
-        note = ((c["gaps"].get("serp") or {}).get("note") or "")
-        A(f'</tbody></table></div><p class="note">Position in the top results; — = not found. {esc(note)}</p>')
-    A('</section>')
+def psi_rec(c, b, device):
+    rec = (c.get("psi_by") or {}).get(b) or {}
+    r = rec.get(device) or {}
+    return None if not r or r.get("error") else r
+
+
+def topics_covered(c, b, min_depth=2):
+    return sum(1 for t in c["topics"] if _int(t["brands"][b]["info"].get("depth")) >= min_depth)
+
+
+# ----------------------------------------------------------------------------- sections
+def nav(h):
+    c = h.c
+    items = [("summary", "1", "Summary"), ("pages", "2", "Pages compared"), ("visibility", "3", "Search visibility"),
+             ("speed", "4", "Page speed & scores"), ("onpage", "5", "On-page SEO"), ("headings", "6", "Heading structure"),
+             ("topics", "7", "Topic coverage"), ("content", "8", "Content side by side"), ("faqs", "9", "FAQ comparison"),
+             ("claims", "10", "Figures & claims")]
+    groups = [("Overview", items[:2]), ("Search & performance", items[2:4]), ("Structure", items[4:6]), ("Content", items[6:])]
+    h.A('<nav class="side" aria-label="Report contents"><div class="rt"><b>Competitive Content Comparison</b>'
+        f'<span>{esc(c["topic"].title() or "Content comparison")}</span></div>')
+    for g, its in groups:
+        h.A(f"<h6>{esc(g)}</h6>")
+        for sid, n, t in its:
+            h.A(f'<a href="#{sid}"><span class="no">{n}</span>{esc(t)}</a>')
+    h.A("<h6>Page details</h6>")
+    for i, b in enumerate(h.order, 1):
+        h.A(f'<a class="sub" href="#{h.pid(b)}">{esc(h.name(b))}{" (ours)" if b == h.you else ""}</a>')
+    h.A('<h6>Appendix</h6><a href="#method"><span class="no">A</span>Method &amp; sources</a></nav>')
+
+
+def header(h):
+    c, meta = h.c, h.meta
+    date = meta.get("created_at") or datetime.now().strftime("%Y-%m-%d")
+    comps = ", ".join(esc(h.name(b)) for b in h.order if b != h.you)
+    h.A(f'<div class="top"><div class="k">Competitive content comparison · {esc(c["meta"].get("page_type") or "page")} page</div>'
+        f'<h1>{esc((c["topic"] or "Content").title())}: {esc(h.name(h.you))} vs competitors</h1>'
+        f'<p>Our page: <a href="{esc(meta.get("your_url"))}" target="_blank" rel="noopener">{esc(meta.get("your_url"))}</a></p>'
+        f'<p>Compared with {comps} · Data collected {esc(date)}</p></div>')
+
+
+def summary(h):
+    c = h.c
+    h.section("summary", "1", "Summary", "Headline measures for each page. Every figure links to the section that explains it.")
+    rows = []
+    ntop = len(c["topics"])
+
+    def score(b, dev, cat="performance"):
+        r = psi_rec(c, b, dev)
+        v = (r or {}).get("scores", {}).get(cat)
+        return _pill(v, rate("score", v)) if v is not None else _pill("n/a", "na")
+
+    best_rank = {}
+    doms = brand_domains(c)
+    for q, res in serp_queries(c):
+        if any(d in (q or "").lower() for d in doms.get(h.you, ())):
+            continue
+        for r in res:
+            for b in h.order:
+                if any((r.get("domain") or _host(r.get("url"))).endswith(d) for d in doms.get(b, ())):
+                    if r.get("rank") and (b not in best_rank or r["rank"] < best_rank[b]):
+                        best_rank[b] = r["rank"]
+
+    def line(label, fn, link):
+        rows.append(f'<tr><td class="lab"><a href="#{link}">{esc(label)}</a></td>' + "".join(h.td(b, fn(b)) for b in h.order) + "</tr>")
+
+    line("Best search position", lambda b: _pill(f"#{best_rank[b]}", "blue") if b in best_rank else _pill("Not in results", "na"), "visibility")
+    line("Mobile performance score", lambda b: score(b, "mobile"), "speed")
+    line("Desktop performance score", lambda b: score(b, "desktop"), "speed")
+    line("Lighthouse SEO score (mobile)", lambda b: score(b, "mobile", "seo"), "speed")
+    line("Indexable (robots meta)", lambda b: robots_cell(h.pages[b]), "onpage")
+    line("H1 tag", lambda b: (_pill("Missing", "poor") if c["hcounts"][b][1] == 0 else
+                             (_pill(f'{c["hcounts"][b][1]} H1s', "ni") if c["hcounts"][b][1] > 1 else _pill("Present", "good"))), "headings")
+    line("H2 / H3 headings", lambda b: f'{c["hcounts"][b][2]} / {c["hcounts"][b][3]}', "headings")
+    line("Words on page", lambda b: f'{_int(h.pages[b].get("word_count_total")):,}', "onpage")
+    line(f"Topics covered in depth (of {ntop})", lambda b: str(topics_covered(c, b)), "topics")
+    line("FAQs on page", lambda b: str(len(h.pages[b].get("faqs") or [])), "faqs")
+    line("Data tables", lambda b: str(_int(h.pages[b].get("tables_count"))), "onpage")
+    h.A('<div class="tw"><table class="cmp"><thead><tr>' + h.th("Measure") + "</tr></thead><tbody>" + "".join(rows) + "</tbody></table></div>")
+
+    obs = []
+    for b in h.order:
+        rb = (h.pages[b].get("robots_meta") or "").lower()
+        if "noindex" in rb:
+            obs.append(f"<b>{esc(h.name(b))}</b> carries <code>robots: {esc(h.pages[b].get('robots_meta'))}</code>, which excludes it from search indexes.")
+    for b in h.order:
+        if c["hcounts"][b][1] == 0:
+            obs.append(f"<b>{esc(h.name(b))}</b> has no H1 tag"
+                       + (f"; its title tag reads “{esc(h.pages[b].get('title'))}”." if h.pages[b].get("title") else "."))
+    if best_rank:
+        lead = min(best_rank, key=best_rank.get)
+        obs.append(f"<b>{esc(h.name(lead))}</b> holds the best position among the compared brands (#{best_rank[lead]}) across the searches tested."
+                   + ("" if h.you in best_rank else f" {esc(h.name(h.you))} does not appear in those results."))
+    perf = {b: (psi_rec(c, b, "mobile") or {}).get("scores", {}).get("performance") for b in h.order}
+    perf = {b: v for b, v in perf.items() if v is not None}
+    if perf:
+        hi, lo = max(perf, key=perf.get), min(perf, key=perf.get)
+        obs.append(f"Mobile performance ranges from {perf[lo]} ({esc(h.name(lo))}) to {perf[hi]} ({esc(h.name(hi))}); "
+                   f"{esc(h.name(h.you))} scores {perf.get(h.you, 'n/a')}.")
+    cov = {b: topics_covered(c, b) for b in h.order}
+    top = max(cov, key=cov.get)
+    obs.append(f"Of {ntop} topics found across the pages, {esc(h.name(top))} covers the most in depth ({cov[top]}); "
+               f"{esc(h.name(h.you))} covers {cov[h.you]}.")
+    fq = {b: len(h.pages[b].get("faqs") or []) for b in h.order}
+    fb = max(fq, key=fq.get)
+    obs.append(f"{esc(h.name(fb))} answers the most FAQs ({fq[fb]}); {esc(h.name(h.you))} answers {fq[h.you]}.")
+    h.A("<h3>Key observations</h3><ul class=obs>" + "".join(f"<li>{o}</li>" for o in obs) + "</ul>")
+    h.end()
+
+
+def robots_cell(p):
+    rb = (p.get("robots_meta") or "").strip()
+    if "noindex" in rb.lower():
+        return _pill("No (noindex)", "poor")
+    if rb or "robots_meta" in p:
+        return _pill("Yes", "good")
+    return _pill("Yes", "good") if p.get("extraction_status") == "full" else _pill("n/a", "na")
+
+
+def pages_compared(h):
+    h.section("pages", "2", "Pages compared", "The exact pages analysed, as fetched on the collection date.")
+    rows = []
+    for b in h.order:
+        p = h.pages[b]
+        rows.append(f'<tr><td class="lab">{h.label(b)}</td><td><a class="mono" href="{esc(p.get("url"))}" target="_blank" rel="noopener">{esc(p.get("url"))}</a></td>'
+                    f'<td>{esc(p.get("title"))}</td><td>{esc(p.get("h1") or "—")}</td>'
+                    f'<td class="num">{_int(p.get("word_count_total")):,}</td><td class="c">{_pill(p.get("extraction_status") or "full", "blue")}</td></tr>')
+    h.A('<div class="tw"><table><thead><tr><th>Brand</th><th>URL</th><th>Title tag</th><th>H1</th><th class="c">Words</th><th class="c">Extraction</th></tr></thead><tbody>'
+        + "".join(rows) + "</tbody></table></div>")
+    notes = h.meta.get("notes") or []
+    if notes:
+        h.A("<h4>Notes on the pages analysed</h4><ul class=plain>" + "".join(f"<li>{esc(n)}</li>" for n in notes) + "</ul>")
+    h.end()
 
 
 def visibility(h):
-    c, A = h.c, h.A
-    order, auth = c["order"], c["auth_by"]
-    h.section("visibility", "Search visibility &amp; authority")
-    if auth:
-        A(f'<p class="lede">Ahrefs Site Explorer for each exact URL (Domain Rating for the whole site), {esc((c["auth"] or {}).get("country", ""))} database, '
-          f'{esc(((c["auth"] or {}).get("fetched_at") or "")[:10])}.</p>')
-        A('<div class="tbl"><table><thead><tr><th>Page</th><th class="num">URL Rating</th><th class="num">Domain Rating</th>'
-          '<th class="num">Organic traffic<em>monthly</em></th><th class="num">Keywords<em>top 100</em></th><th class="num">Keywords<em>top 3</em></th>'
-          '<th class="num">Referring domains</th><th class="num">Backlinks</th></tr></thead><tbody>')
-        for b in order:
-            a = auth.get(b) or {}
-            A(f'<tr{h.trc(b)}><td>{esc(b)}</td>' + "".join(f'<td class="num">{fnum(a.get(k))}</td>' for k in
-              ("url_rating", "domain_rating", "org_traffic", "org_keywords", "org_keywords_top3", "refdomains", "backlinks")) + '</tr>')
-        A('</tbody></table></div><p class="note">URL Rating and Domain Rating: backlink strength on Ahrefs’ 0–100 scale. '
-          'Organic traffic is Ahrefs’ estimate of monthly visits from Google.</p>')
-    else:
-        h.unavailable("Ahrefs was not connected for this report.",
-                      "URL Rating, Domain Rating, organic traffic, ranking keywords (top 100 and top 3), referring domains and backlinks for each page.")
-    qs, _ = serp_matrix(c["ranking"])
-    top = [r for r in c["ranking"].get("ranking_pages") or [] if r.get("query") == (qs[0] if qs else None)][:10]
-    A('<div class="two"><div>')
-    if top:
-        A(f'<h3>Top results: “{esc(qs[0])}”</h3><div class="tbl"><table><thead><tr><th class="num">#</th><th>Result</th><th>Same page type</th></tr></thead><tbody>')
-        for r in top:
-            dom = r.get("domain") or r.get("brand")
-            A(f'<tr{h.trc(dom)}><td class="num">{r.get("rank")}</td><td>{esc(dom)}<small class="muted" style="display:block">{esc((r.get("title") or "")[:90])}</small></td>'
-              f'<td>{"Yes" if r.get("same_type") else "No"}</td></tr>')
-        A('</tbody></table></div>')
-    A('</div><div><h3>External sources and brands cited</h3><div class="tbl"><table><thead><tr><th>Page</th><th>Mentions</th></tr></thead><tbody>')
-    from report_core import map_get
-    for b in order:
-        ex = map_get(c["gaps"].get("external_brands") or {}, b, []) or []
-        A(f'<tr{h.trc(b)}><td class="nowrap">{esc(b)}</td><td>{esc("; ".join(ex)) or "<span class=muted>None</span>"}</td></tr>')
-    A('</tbody></table></div></div></div>')
-    if c["gaps"].get("ranking_assessment"):
-        A('<h3>Ranking assessment</h3><div class="tbl"><table><thead><tr><th>Page</th><th>Google</th><th>AI search</th></tr></thead><tbody>')
-        for b in order:
-            a = map_get(c["gaps"]["ranking_assessment"], b, {}) or {}
-            A(f'<tr{h.trc(b)}><td class="nowrap">{esc(b)}</td><td>{esc(a.get("google") or "")}</td><td>{esc(a.get("ai_search") or "")}</td></tr>')
-        A('</tbody></table></div>')
-    A('</section>')
+    c = h.c
+    qs = serp_queries(c)
+    doms = brand_domains(c)
+    h.section("visibility", "3", "Search visibility",
+              "Best organic position of any URL on each brand's domain, per search. The page type of the ranking URL is shown in brackets.")
+    if not qs:
+        h.A('<p class="nc">No search-ranking data was collected for this run.</p>')
+        return h.end()
+    buyer = [(q, r) for q, r in qs if not any(d in (q or "").lower() for d in doms.get(h.you, ()))]
+    rows = []
+    for q, res in buyer:
+        cells = []
+        for b in h.order:
+            hit = next((r for r in sorted(res, key=lambda r: r.get("rank") or 99)
+                        if any((r.get("domain") or _host(r.get("url"))).endswith(d) for d in doms.get(b, ()))), None)
+            cells.append(h.td(b, _pill(f'#{hit["rank"]}', "blue") + f' <span class="small">({page_kind(hit.get("url"))})</span>'
+                              if hit else _pill("Not in results", "na")))
+        rows.append(f'<tr><td class="lab">{esc(q)}</td>' + "".join(cells) + "</tr>")
+    h.A('<div class="tw"><table class="cmp"><thead><tr>' + h.th("Search query") + "</tr></thead><tbody>" + "".join(rows) + "</tbody></table></div>")
+    depth = max((len(r) for _, r in qs), default=0)
+    h.A(f'<p class="small">Top {depth} organic results recorded per search. Positions come from the search index used during collection and vary by location and date.</p>')
+    h.A('<details class="topic"><summary><b>Full results for every search</b></summary><div style="padding:12px 16px">')
+    for q, res in qs:
+        h.A(f"<h4>{esc(q)}</h4><div class=tw><table><thead><tr><th class=c>#</th><th>Domain</th><th>URL</th></tr></thead><tbody>")
+        for r in sorted(res, key=lambda r: r.get("rank") or 99):
+            owner = next((b for b in h.order if any((r.get("domain") or _host(r.get("url"))).endswith(d) for d in doms.get(b, ()))), None)
+            h.A(f'<tr><td class=c>{esc(r.get("rank"))}</td><td>{esc(r.get("domain") or _host(r.get("url")))}'
+                + (f' <span class="pill blue">{esc(h.name(owner))}</span>' if owner else "")
+                + f'</td><td class=mono>{esc(r.get("url"))}</td></tr>')
+        h.A("</tbody></table></div>")
+    h.A("</div></details>")
+    h.end()
+
+
+def speed(h):
+    c = h.c
+    psi = c.get("psi") or {}
+    h.section("speed", "4", "Page speed & scores",
+              "Lighthouse category scores (0–100) and lab Core Web Vitals for mobile and desktop. "
+              "Colour bands follow Google's thresholds: good, needs improvement, poor.")
+    if not c.get("psi_by"):
+        h.A('<p class="nc">Page-speed data was not collected for this run.</p>')
+        return h.end()
+    for dev in ("mobile", "desktop"):
+        h.A(f"<h3>{dev.title()}: Lighthouse scores</h3>")
+        rows = []
+        for key, lab in CATS:
+            cells = []
+            for b in h.order:
+                v = ((psi_rec(c, b, dev) or {}).get("scores") or {}).get(key)
+                cells.append(h.td(b, _pill(v, rate("score", v)) if v is not None else _pill("n/a", "na")))
+            rows.append(f'<tr><td class="lab">{lab}</td>' + "".join(cells) + "</tr>")
+        h.A('<div class="tw"><table class="cmp"><thead><tr>' + h.th("Category") + "</tr></thead><tbody>" + "".join(rows) + "</tbody></table></div>")
+        h.A(f"<h3>{dev.title()}: lab metrics</h3>")
+        rows = []
+        for key, short, long_ in LAB:
+            cells = []
+            for b in h.order:
+                v = ((psi_rec(c, b, dev) or {}).get("lab") or {}).get(key)
+                st = rate(key, v) if key not in ("bytes",) else ""
+                cells.append(h.td(b, (_pill(_metric(key, v), st) if st else esc(_metric(key, v)))))
+            rows.append(f'<tr><td class="lab">{esc(short)}<div class="small" style="font-weight:400">{esc(long_)}</div></td>' + "".join(cells) + "</tr>")
+        h.A('<div class="tw"><table class="cmp"><thead><tr>' + h.th("Metric") + "</tr></thead><tbody>" + "".join(rows) + "</tbody></table></div>")
+        field = {b: ((psi_rec(c, b, dev) or {}).get("field") or {}) for b in h.order}
+        if any(f.get("has_data") for f in field.values()):
+            rows = []
+            for key, lab in (("lcp_ms", "LCP (p75)"), ("inp_ms", "INP (p75)"), ("cls", "CLS (p75)"), ("ttfb_ms", "TTFB (p75)")):
+                cells = []
+                for b in h.order:
+                    v = field[b].get(key) if field[b].get("has_data") else None
+                    cells.append(h.td(b, _pill(_metric(key, v), rate(key, v)) if v is not None else _pill("No data", "na")))
+                rows.append(f'<tr><td class="lab">{lab}</td>' + "".join(cells) + "</tr>")
+            h.A(f"<h4>{dev.title()}: real-user field data (Chrome UX Report, 28 days)</h4>"
+                '<div class="tw"><table class="cmp"><thead><tr>' + h.th("Metric") + "</tr></thead><tbody>" + "".join(rows) + "</tbody></table></div>")
+    versions = sorted({(psi_rec(c, b, d) or {}).get("lighthouse_version") for b in h.order for d in ("mobile", "desktop")} - {None, ""})
+    when = (psi.get("fetched_at") or "")[:10]
+    src = psi.get("source") or "PageSpeed Insights"
+    note = f"Source: {esc(src)}" + (f", Lighthouse {esc(', '.join(versions))}" if versions and not any(v in src for v in versions) else "") + (f", measured {esc(when)}" if when else "") + "."
+    if "lighthouse" in (psi.get("engines") or []):
+        note += (" Lab values come from a single run per page and device and can vary between runs. "
+                 "Real-user field data (Chrome UX Report) is only available through the PageSpeed Insights API.")
+    h.A(f'<p class="small">{note}</p>')
+    h.end()
+
+
+def links_cell(page, quality):
+    n, raw = internal_link_count(page, quality), len(onpage_internal_links(page))
+    return str(n) + (f'<div class="small">{raw} including link lists and hubs</div>' if raw != n else "")
+
+
+def onpage(h):
+    c = h.c
+    h.section("onpage", "5", "On-page SEO", "The elements search engines read first, exactly as each page ships them.")
+    P = h.pages
+
+    def txt(v, n=None):
+        v = (v or "").strip()
+        if not v:
+            return _pill("None", "na")
+        return esc(v) + (f'<div class="small">{len(v)} characters</div>' if n else "")
+
+    rows = [
+        ("Title tag", lambda b: txt(P[b].get("title"), True)),
+        ("Meta description", lambda b: txt(P[b].get("meta_description"), True)),
+        ("H1", lambda b: txt(P[b].get("h1")) if P[b].get("h1") else _pill("No H1", "poor")),
+        ("Robots meta", lambda b: esc(P[b].get("robots_meta")) if P[b].get("robots_meta") else '<span class="small">Not set (indexable by default)</span>'),
+        ("Canonical", lambda b: f'<span class="mono">{esc(P[b].get("canonical"))}</span>' if P[b].get("canonical") else '<span class="small">Not recorded</span>'),
+        ("Structured data (JSON-LD)", lambda b: ", ".join(esc(s) for s in P[b].get("schema_types") or []) or _pill("None found", "na")),
+        ("Words on page", lambda b: f'{_int(P[b].get("word_count_total")):,}'),
+        ("Data tables", lambda b: str(_int(P[b].get("tables_count")))),
+        ("Images with alt text", lambda b: f'{_int(P[b].get("image_alt_count"))} of {_int(P[b].get("image_count"))}'),
+        ("Internal links in the article", lambda b: links_cell(P[b], c.get("quality") or {})),
+        ("External links", lambda b: str(_int(P[b].get("external_link_count")))),
+        ("Author", lambda b: esc(P[b].get("author")) if P[b].get("author") else _pill("Not named", "na")),
+        ("Reviewer", lambda b: esc(P[b].get("reviewer")) if P[b].get("reviewer") else _pill("Not named", "na")),
+        ("Published / updated date on page", lambda b: esc(" / ".join(x for x in (P[b].get("published_date"), P[b].get("modified_date")) if x)) or _pill("Not shown", "na")),
+    ]
+    body = "".join(f'<tr><td class="lab">{esc(l)}</td>' + "".join(h.td(b, fn(b), "") for b in h.order) + "</tr>" for l, fn in rows)
+    h.A('<div class="tw"><table class="cmp"><thead><tr>' + h.th("Element") + "</tr></thead><tbody>" + body + "</tbody></table></div>")
+    topic = c["topic"]
+    if topic:
+        kc = {b: keyword_checks(P[b], topic) for b in h.order}
+        yn = lambda v: _pill("Yes", "good") if v else _pill("No", "na")
+        krows = [("In title tag", lambda b: yn(kc[b]["title"])), ("In meta description", lambda b: yn(kc[b]["meta"])),
+                 ("In H1", lambda b: yn(kc[b]["h1"])), ("In URL", lambda b: yn(kc[b]["url"])),
+                 ("In first 100 words", lambda b: yn(kc[b]["first100"])),
+                 ("H2/H3 headings containing it", lambda b: f'{kc[b]["subheads"]} of {kc[b]["subheads_total"]}'),
+                 ("Exact phrase in body", lambda b: f'{kc[b]["exact_body"]} ({kc[b]["per_1000"]} per 1,000 words)')]
+        h.A(f'<h3>Placement of the phrase “{esc(topic)}”</h3><p class="small">All words of the phrase must appear for a Yes; plurals count.</p>')
+        body = "".join(f'<tr><td class="lab">{esc(l)}</td>' + "".join(h.td(b, fn(b)) for b in h.order) + "</tr>" for l, fn in krows)
+        h.A('<div class="tw"><table class="cmp"><thead><tr>' + h.th("Placement") + "</tr></thead><tbody>" + body + "</tbody></table></div>")
+    h.end()
 
 
 def headings(h):
-    c, A = h.c, h.A
-    order, your, pages, hc, tree = c["order"], c["your"], c["pages"], c["hcounts"], c["tree"]
-    h.section("headings", "Heading structure", "Every H1–H4 heading on the pages, merged into one hierarchy. Differently punctuated headings are matched; "
-                                               "✓ means that heading exists on that page.")
-    A('<div class="tbl"><table class="mx"><thead><tr><th>Heading level</th>' + h.th_brands() + '</tr></thead><tbody>')
-    for l in (1, 2, 3, 4):
-        A(f'<tr><td class="rowh">H{l}</td>' + "".join(f'<td class="c{h.you(b)}">{hc[b][l]}</td>' for b in order) + '</tr>')
-    A('</tbody></table></div>')
-    y, comps = hc[your], order[1:]
-    m2, m3 = median([hc[b][2] for b in comps]), median([hc[b][3] for b in comps])
-    A(f'<div class="callout"><b>Your page:</b> {y[1]} H1 (“{esc(pages[your].get("h1") or "")}”), {y[2]} H2, {y[3]} H3, {y[4]} H4. '
-      f'Competitor median: {m2:g} H2 and {m3:g} H3.</div>' if m2 is not None else '')
-    miss = sum(1 for r in tree if not r["present"][your] and sum(r["present"].values()) >= 2)
-    A(f'<h3>Heading hierarchy: H1 › H2 › H3 › H4 ({len(tree):,} headings)</h3>'
-      f'<p class="note" style="margin-top:-4px">{miss} headings are used by two or more competitors but not by your page.</p>')
-    h.filterbar("hier", [("all", "All"), ("miss", "Missing on your page"), ("shared", "Used by 2+ pages")])
-    A('<div class="tbl scroll"><table class="mx tree" id="hier"><thead><tr><th>Heading</th>' + h.th_brands() + '</tr></thead><tbody>')
-    for r in tree:
-        A(f'<tr data-you="{int(r["present"][your])}" data-n="{sum(r["present"].values())}" class="lv{r["level"]}"><td class="h"><span class="tag">H{r["level"]}</span>{esc(r["text"])}</td>'
-          + "".join(h.yes(r["present"][b], b) for b in order) + '</tr>')
-    A('</tbody></table></div>')
-    nih = c["not_in_headings"]
-    A('<h3>Topics styled as headings but not marked up as H-tags</h3>')
-    if any(nih.values()):
-        A('<div class="tbl"><table><thead><tr><th>Page</th><th>Text shown as a title</th><th>Current tag</th><th>Under heading</th><th>Should be</th></tr></thead><tbody>')
-        for b in order:
-            for r in nih[b]:
-                A(f'<tr{h.trc(b)}><td class="nowrap">{esc(b)}</td><td>{esc(r["text"])}</td><td>&lt;{esc(r["tag"])}&gt;</td>'
-                  f'<td>{esc(r["parent_heading"])}</td><td>{r["suggested"]}</td></tr>')
-        A('</tbody></table></div>')
-    else:
-        A('<p class="note">None found: every visual section title on these pages uses a real heading tag.</p>')
-    sf = c["gaps"].get("structure_fix") or {}
-    probs = [p for _, p in c["structure_problems"]] + [esc(p) for p in sf.get("problems") or []]
-    if probs or sf.get("title_recommendation") or sf.get("h1_recommendation"):
-        A('<h3>Structure issues on your page</h3><ul class="findings">' + "".join(f'<li><b>Issue</b><span>{p}</span></li>' for p in probs))
-        if sf.get("title_recommendation"):
-            A(f'<li><b>Title</b><span>{esc(sf["title_recommendation"])}</span></li>')
-        if sf.get("h1_recommendation"):
-            A(f'<li><b>H1</b><span>{esc(sf["h1_recommendation"])}</span></li>')
-        A('</ul>' + (f'<p class="note">{esc(sf["notes"])}</p>' if sf.get("notes") else ""))
-    A('<h3>Page structure: every heading and its content, in page order</h3>')
-    if h.p:
-        A('<p class="note">Full heading-by-heading content for every page is in the HTML report and XLSX → Page Structure.</p>')
-    else:
-        for b in order:
-            secs = [s for s in pages[b].get("sections") or [] if s.get("heading") and s.get("heading") != "(intro)"]
-            body = '<ol class="struct">' + "".join(
-                f'<li class="lv{min(max(int(s.get("level") or 1), 1), 4)}"><div class="t"><span class="tag">H{int(s.get("level") or 0)}</span>{esc(s.get("heading"))}</div>'
-                f'<p class="x">{esc(s.get("text") or "")}</p></li>' for s in secs) + '</ol>'
-            h.details(f'<b>{esc(b)}</b><span class="muted">{len(secs)} sections · H1 {hc[b][1]} · H2 {hc[b][2]} · H3 {hc[b][3]} · H4 {hc[b][4]}</span>', body)
-    A('</section>')
-
-
-def topics(h):
-    c, A = h.c, h.A
-    order, your, kpi = c["order"], c["your"], c["kpis"]
-    h.section("topics", "Topic coverage &amp; gaps", esc(kpi.get("coverage_basis") or ""))
-    A('<div class="kpis">'
-      f'<div class="kpi"><div class="l">Coverage</div><div class="v">{kpi.get("coverage_pct", "—")}%</div><div class="s">{len(c["topics"])} topics compared</div></div>'
-      f'<div class="kpi"><div class="l">Missing · Thin</div><div class="v">{kpi.get("missing_count", 0)}<small> · {kpi.get("thin_count", 0)}</small></div><div class="s">Topics to add or deepen</div></div>'
-      f'<div class="kpi"><div class="l">FAQ gaps</div><div class="v">{kpi.get("faq_gap_count", 0)}</div><div class="s">Competitor questions you don’t answer</div></div>'
-      f'<div class="kpi"><div class="l">Unique to you</div><div class="v">{kpi.get("unique_count", 0)}</div><div class="s">Topics only your page covers</div></div></div>')
-    A('<h3>Coverage by topic: heading level used and depth</h3><p class="note" style="margin-top:-4px">Cell = heading level of the section covering the topic '
-      '(Body = in text with no dedicated heading), then depth. — = not covered. Select a topic for the exact content.</p>')
-    h.filterbar("topicsm", [("all", "All topics"), ("miss", "Missing on your page"), ("shared", "Covered by 2+ pages")])
-    A('<div class="tbl"><table class="mx" id="topicsm"><thead><tr><th>Topic</th>' + h.th_brands() + '</tr></thead><tbody>')
-    for i, t in enumerate(c["topics"]):
+    c = h.c
+    h.section("headings", "6", "Heading structure",
+              "How each page marks up its headings (H1–H4): counts, the H1 itself, and the H1/H2 outline side by side.")
+    hc = c["hcounts"]
+    rows = []
+    for lvl in (1, 2, 3, 4):
         cells = []
-        for b in order:
-            v = t["brands"][b]
-            d = int(v["info"].get("depth", 0) or 0)
-            cells.append(f'<td class="c{h.you(b)}">' + (f'<span class="tag">{v["tag"]}</span><small class="dp">{DEPTH_LABEL.get(d, "")}</small>'
-                                                        if v["present"] else '<span class=no>—</span>') + '</td>')
-        A(f'<tr data-you="{int(t["brands"][your]["present"])}" data-n="{sum(v["present"] for v in t["brands"].values())}">'
-          f'<td><a href="#t{i}">{esc(t["name"])}</a><small class="muted"> · {esc(t["intent"])}</small></td>{"".join(cells)}</tr>')
-    A('</tbody></table></div>')
-    if any(v["source"] == "matched" for t in c["topics"] for v in t["brands"].values()):
-        A('<p class="note">Heading levels marked here were matched automatically from heading and section text; '
-          'runs analysed with plugin v0.7+ record the exact heading per page.</p>')
-    A('<h3>Unique coverage: topics only one page covers</h3><div class="tbl"><table><thead><tr><th>Page</th><th>Topics</th></tr></thead><tbody>')
-    for b in order:
-        A(f'<tr{h.trc(b)}><td class="nowrap">{esc(b)}</td><td>{esc("; ".join(c["unique"].get(b) or [])) or "<span class=muted>None</span>"}</td></tr>')
-    A('</tbody></table></div>')
-    A(f'<h3>Prioritised gaps ({len(c["gap_list"])})</h3>' + (f'<p class="note" style="margin-top:-4px">{esc(kpi.get("priority_method"))}</p>' if kpi.get("priority_method") else ""))
-    for g in c["gap_list"]:
-        p = PRIORITY_LABEL.get(int(g.get("priority") or 0), "")
-        A(f'<details class="gap"{" open" if h.p else ""}><summary><span><span class="pill {p.lower()}">{p}</span></span><span>{esc((g.get("type") or "").title())}</span>'
-          f'<span style="color:var(--ink)">{esc(g.get("title"))}</span><span class="sb muted">{esc(g.get("exemplar_brand") or "")}</span></summary>'
-          f'<div class="body"><p>{esc(g.get("detail") or "")}</p>' + (f'<p><b>Recommendation:</b> {esc(g.get("recommendation"))}</p>' if g.get("recommendation") else "")
-          + '</div></details>')
-    A('</section>')
+        for b in h.order:
+            n = hc[b][lvl]
+            cells.append(h.td(b, (_pill("Missing", "poor") if lvl == 1 and n == 0 else
+                                  _pill(f"{n} (multiple)", "ni") if lvl == 1 and n > 1 else str(n))))
+        rows.append(f'<tr><td class="lab">H{lvl}</td>' + "".join(cells) + "</tr>")
+    h.A('<div class="tw"><table class="cmp"><thead><tr>' + h.th("Tag") + "</tr></thead><tbody>" + "".join(rows) + "</tbody></table></div>")
+    h.A("<h3>H1 and H2 outline, side by side</h3><p class=small>H3 and H4 headings are listed in each page's detail view.</p><div class=grid5>")
+    for b in h.order:
+        outline = [x for x in h.pages[b].get("heading_outline") or [] if _int(x.get("level")) in (1, 2)]
+        items = "".join(f'<li><span class="tag h{_int(x["level"])}">H{_int(x["level"])}</span><span>{esc(x.get("text"))}</span></li>' for x in outline)
+        if not any(_int(x.get("level")) == 1 for x in outline):
+            items = '<li><span class="pill poor">No H1</span></li>' + items
+        h.A(f'<div class="col{" us" if b == h.you else ""}"><h4>{h.label(b)}</h4><ul class="ol">{items or "<li class=nc>No H1/H2 headings</li>"}</ul></div>')
+    h.A("</div>")
+    tree = c.get("tree") or []
+    shared = [r for r in tree if sum(r["present"].values()) >= 2]
+    h.A(f'<h3>Headings used by more than one page</h3><p class="small">{len(shared)} of {len(tree)} distinct headings appear on two or more pages (matched ignoring case and punctuation).</p>')
+    if shared:
+        body = "".join(f'<tr><td><span class="tag h{r["level"]}">H{r["level"]}</span> {esc(r["text"])}</td>'
+                       + "".join(h.td(b, _pill("Yes", "good") if r["present"][b] else '<span class="d0">—</span>') for b in h.order) + "</tr>" for r in shared)
+        h.A('<div class="tw"><table class="cmp"><thead><tr>' + h.th("Heading") + "</tr></thead><tbody>" + body + "</tbody></table></div>")
+    h.end()
+
+
+def topic_cov(h):
+    c = h.c
+    topics = c["topics"]
+    h.section("topics", "7", "Topic coverage",
+              f"{len(topics)} topics were identified across the five pages. Each cell shows how deeply that page covers the topic: "
+              "Deep (a full section with an example, table or calculator), Standard (a proper section), Mention (a line or two), or — (not covered).")
+    h.A('<div class="cards">')
+    for b in h.order:
+        h.A(f'<div class="card{" us" if b == h.you else ""}"><div class="v">{topics_covered(c, b)}</div>'
+            f'<div class="l">{h.label(b)}<br>topics covered in depth · {topics_covered(c, b, 1)} mentioned at all</div></div>')
+    h.A("</div>")
+    for intent in ("high", "medium", "low"):
+        rows = [t for t in topics if (t.get("intent") or "medium") == intent]
+        if not rows:
+            continue
+        rows.sort(key=lambda t: -sum(1 for b in h.order if _int(t["brands"][b]["info"].get("depth")) >= 2))
+        h.A(f"<h3>{INTENT[intent]} ({len(rows)})</h3>")
+        body = []
+        for t in rows:
+            cells = []
+            for b in h.order:
+                d = _int(t["brands"][b]["info"].get("depth"))
+                lab, cls = DEPTH.get(d, DEPTH[0])
+                cells.append(f'<td class="c {cls}">{lab}</td>')
+            n = sum(1 for b in h.order if _int(t["brands"][b]["info"].get("depth")) >= 2)
+            body.append(f'<tr><td><a href="#t-{esc(t["id"])}">{esc(t["name"])}</a></td>' + "".join(cells) + f'<td class="c">{n}</td></tr>')
+        h.A('<div class="tw"><table class="cmp"><thead><tr>' + h.th("Topic") + '<th class="c xtra">Pages in depth</th></tr></thead><tbody>' + "".join(body) + "</tbody></table></div>")
+    comps = [b for b in h.order if b != h.you]
+    missing = [t for t in topics if _int(t["brands"][h.you]["info"].get("depth")) < 2
+               and sum(1 for b in comps if _int(t["brands"][b]["info"].get("depth")) >= 2) >= 2]
+    only_us = [t for t in topics if _int(t["brands"][h.you]["info"].get("depth")) >= 2
+               and not any(_int(t["brands"][b]["info"].get("depth")) >= 2 for b in comps)]
+    h.A('<div class="cols2">')
+    h.A(f'<div class="card"><h4 style="margin-top:0">Covered in depth by two or more competitors, not by {esc(h.name(h.you))} ({len(missing)})</h4><ul class="plain">'
+        + "".join(f'<li><a href="#t-{esc(t["id"])}">{esc(t["name"])}</a> <span class="small">— {", ".join(esc(h.name(b)) for b in comps if _int(t["brands"][b]["info"].get("depth")) >= 2)}</span></li>' for t in missing)
+        + "</ul></div>")
+    h.A(f'<div class="card us"><h4 style="margin-top:0">Covered in depth only by {esc(h.name(h.you))} ({len(only_us)})</h4><ul class="plain">'
+        + "".join(f'<li><a href="#t-{esc(t["id"])}">{esc(t["name"])}</a></li>' for t in only_us) + "</ul></div>")
+    h.A("</div>")
+    h.end()
 
 
 def content(h):
-    c, A = h.c, h.A
-    order, your = c["order"], c["your"]
-    h.section("content", "Content by topic", "For every topic: the heading each page uses, how deep it goes, and the exact text under that heading. "
-                                             "Similarity compares each competitor’s text with yours.")
-    A('<div class="tools noprint"><button class="btn" onclick="accAll(\'#content-topics\',true)">Expand all</button>'
-      '<button class="btn" onclick="accAll(\'#content-topics\',false)">Collapse all</button></div><div id="content-topics">')
-    for i, t in enumerate(c["topics"]):
-        yours = ((t["brands"][your]["sec"] or {}).get("text") or "")
-        cov = [b for b in order if t["brands"][b]["present"]]
-        yv = t["brands"][your]
-        status = f'Your page: {yv["tag"]} · {DEPTH_LABEL.get(int(yv["info"].get("depth", 0) or 0), "")}' if yv["present"] else "Not on your page"
-        cards = []
-        for b in order:
-            v = t["brands"][b]
-            head = f'<div class="ch"><b>{esc(b)}</b>'
-            if not v["present"]:
-                cards.append(f'<div class="card absent">{head}</div><p class="muted">Not covered on this page.</p></div>')
+    c = h.c
+    h.section("content", "8", "Content side by side",
+              "For every topic, what each page wrote: the heading it sits under, a summary of the coverage, and the page's own text.")
+    h.A('<div class="tools" data-grp="tf"><button class="btn on" onclick="filt(this,\'tf\',\'all\')">All topics</button>'
+        '<button class="btn" onclick="filt(this,\'tf\',\'high\')">High-value only</button>'
+        f'<button class="btn" onclick="filt(this,\'tf\',\'notours\')">Not covered in depth by {esc(h.name(h.you))}</button>'
+        '<span style="flex:1"></span><button class="btn" onclick="accAll(\'#ctopics\',true)">Expand all</button>'
+        '<button class="btn" onclick="accAll(\'#ctopics\',false)">Collapse all</button></div><div id="ctopics">')
+    order_i = {"high": 0, "medium": 1, "low": 2}
+    for i, t in enumerate(sorted(c["topics"], key=lambda t: order_i.get(t.get("intent"), 1))):
+        tags = [t.get("intent") or "medium"]
+        if _int(t["brands"][h.you]["info"].get("depth")) < 2:
+            tags.append("notours")
+        chips = "".join(f'<span class="chip {DEPTH.get(_int(t["brands"][b]["info"].get("depth")), DEPTH[0])[1]}">{esc(h.name(b))}: '
+                        f'{DEPTH.get(_int(t["brands"][b]["info"].get("depth")), DEPTH[0])[0]}</span>' for b in h.order)
+        h.A(f'<details class="topic" id="t-{esc(t["id"])}" data-tf="{" ".join(tags)}"{" open" if (h.p or i < 2) else ""}>'
+            f'<summary><b>{esc(t["name"])}</b>{chips}</summary>')
+        for b in h.order:
+            cell = t["brands"][b]
+            info = cell["info"]
+            d = _int(info.get("depth"))
+            sec = cell.get("sec") if _quotable(cell.get("sec")) else None
+            who = f'<div class="who"><b>{esc(h.name(b))}</b>' + ('<span class="us-tag">OUR PAGE</span>' if b == h.you else "")
+            if not cell["present"] and d == 0:
+                h.A(f'<div class="row{" us" if b == h.you else ""}">{who}</div><div class="nc">Not covered on this page.</div></div>')
                 continue
-            info, sec = v["info"], v["sec"]
-            flags = [DEPTH_LABEL.get(int(info.get("depth", 0) or 0), ""), f'{int(info.get("word_count") or 0):,} words']
-            flags += [x for x, k in (("example", "has_example"), ("table", "has_table")) if info.get(k)]
-            text = (sec or {}).get("text") or ""
-            if sec and v["tag"] == "Body":
-                hd = f'<div class="hd"><span class="tag">Body</span><span class="muted" style="font-weight:400">No dedicated heading; in the text under “{esc(sec.get("heading") or "")}”</span></div>'
-            elif sec:
-                hd = f'<div class="hd"><span class="tag">{v["tag"]}</span>{esc(sec.get("heading") or "")}</div>'
-            else:
-                hd = '<div class="hd"><span class="tag">Body</span><span class="muted" style="font-weight:400">No dedicated heading</span></div>'
-            sim = ""
-            if b != your and text and yours:
-                pct = similarity(yours, text)
-                sim = f'<span class="sim">Similarity to yours: {pct}% · {sim_verdict(pct)}</span>'
-            cards.append(f'<div class="card{" yours" if b == your else ""}">{head}<span class="muted">{" · ".join(f for f in flags if f)}</span></div>{hd}'
-                         f'<p class="sum"><span>Summary</span>{esc(info.get("snippet") or "")}</p>'
-                         + (f'<div class="text">{esc(text)}</div>' if text else '<p class="muted">Section text not captured.</p>') + f'{sim}</div>')
-        A(f'<details class="acc topic" id="t{i}"{" open" if h.p else ""}><summary><b>{esc(t["name"])}</b>'
-          f'<span class="muted">{len(cov)} of {len(order)} pages · {status}</span></summary><div class="cards">{"".join(cards)}</div></details>')
-    A('</div></section>')
+            loc = (f'{esc(cell.get("tag") or "")}' + (f' · “{esc(sec.get("heading"))}”' if sec and sec.get("heading") else "")) if (cell.get("tag") and sec) else ""
+            meta_bits = [DEPTH.get(d, DEPTH[0])[0]]
+            if info.get("word_count"):
+                meta_bits.append(f'~{_int(info.get("word_count"))} words')
+            if info.get("has_table"):
+                meta_bits.append("table")
+            if info.get("has_example"):
+                meta_bits.append("worked example")
+            who += f'<span class="small">{" · ".join(esc(x) for x in meta_bits)}</span>' + (f'<span class="small">{loc}</span>' if loc else "") + "</div>"
+            body = (f'<div class="cap">Summary</div><p class="sum">{esc(info.get("snippet") or "")}</p>') if info.get("snippet") else ""
+            text = _sec_text(sec)
+            if text:
+                head, rest = text[:900], text[900:]
+                if rest:
+                    cut = head.rfind(" ")
+                    head, rest = (head[:cut], head[cut:] + rest) if cut > 600 else (head, rest)
+                body += f'<div class="cap">On the page</div><blockquote class="quote">{esc(head)}{"…" if rest else ""}</blockquote>'
+                if rest:
+                    body += f'<details class="more"><summary>Read the full section</summary><blockquote class="quote more">{esc(text)}</blockquote></details>'
+            elif sec and sec.get("summary"):
+                body += f'<blockquote class="quote">{esc(sec.get("summary"))}</blockquote>'
+            h.A(f'<div class="row{" us" if b == h.you else ""}">{who}<div>{body or "<span class=nc>Covered without a separate section.</span>"}</div></div>')
+        h.A("</details>")
+    h.A("</div>")
+    h.end()
 
 
 def faqs(h):
-    c, A = h.c, h.A
-    order, your, pages, rows = c["order"], c["your"], c["pages"], c["faq_rows"]
-    ours = sum(r["present"][your] for r in rows)
-    h.section("faqs", "FAQs", f'{len(rows)} distinct questions across the pages; your page answers {ours}. Differently worded questions on the same point are grouped.')
-    A('<div class="tbl"><table class="mx"><thead><tr><th></th>' + h.th_brands() + '</tr></thead><tbody><tr><td class="rowh">Questions on page</td>'
-      + "".join(f'<td class="c{h.you(b)}">{len(pages[b].get("faqs") or [])}</td>' for b in order) + '</tr><tr><td class="rowh">FAQPage schema</td>'
-      + "".join(h.yes("FAQPage" in (pages[b].get("schema_types") or []), b) for b in order) + '</tr></tbody></table></div>')
-    fg = c["gaps"].get("faq_gaps") or []
-    if fg:
-        from report_core import _norm
-        A(f'<h3>Questions competitors answer and you don’t ({len(fg)})</h3><div class="tbl"><table class="mx"><thead><tr><th>Question</th>' + h.th_brands() + '</tr></thead><tbody>')
-        for f in fg:
-            ab = {_norm(x) for x in f.get("answered_by") or []}
-            A(f'<tr><td>{esc(f.get("question"))}</td>' + "".join(h.yes(_norm(b) in ab, b) for b in order) + '</tr>')
-        A('</tbody></table></div>')
-    A('<h3>All questions by page</h3>')
-    h.filterbar("faqm", [("all", "All questions"), ("miss", "Not answered by you"), ("shared", "Answered by 2+ pages")])
-    A('<div class="tbl scroll"><table class="mx" id="faqm"><thead><tr><th>Question</th>' + h.th_brands() + '</tr></thead><tbody>')
-    for r in rows:
-        A(f'<tr data-you="{int(r["present"][your])}" data-n="{sum(r["present"].values())}"><td>{esc(r["question"])}</td>' + "".join(h.yes(r["present"][b], b) for b in order) + '</tr>')
-    A('</tbody></table></div><h3>Questions and answers as published</h3>')
-    from report_core import clean_text
-    for b in order:
-        fq = pages[b].get("faqs") or []
-        body = ('<ol class="faq">' + "".join(f'<li><p class="q">{esc(f.get("question") or "")}</p><p class="a">{esc(clean_text(f.get("answer") or ""))}</p></li>' for f in fq) + '</ol>'
-                if fq else '<p class="muted" style="padding:0 14px 12px">This page has no FAQ section.</p>')
-        h.details(f'<b>{esc(b)}</b><span class="muted">{len(fq)} questions</span>', body)
-    A('</section>')
+    c = h.c
+    h.section("faqs", "9", "FAQ comparison", "Questions each page answers. Differently worded questions about the same thing are grouped into one row.")
+    h.A('<div class="cards">')
+    for b in h.order:
+        h.A(f'<div class="card{" us" if b == h.you else ""}"><div class="v">{len(h.pages[b].get("faqs") or [])}</div><div class="l">{h.label(b)}<br>FAQs on the page</div></div>')
+    h.A("</div>")
+    gaps = (c.get("gaps") or {}).get("faq_gaps") or []
+    if gaps:
+        comps = [b for b in h.order if b != h.you]
+        body = "".join(f'<tr><td>{esc(g.get("question"))}</td>' + "".join(h.td(b, _pill("Yes", "good") if b in (g.get("answered_by") or []) else '<span class="d0">—</span>') for b in comps) + "</tr>" for g in gaps)
+        h.A(f"<h3>Questions answered by competitors, not on {esc(h.name(h.you))} ({len(gaps)})</h3>"
+            '<div class="tw"><table><thead><tr><th>Question</th>' + "".join(f'<th class="c">{esc(h.name(b))}</th>' for b in comps) + "</tr></thead><tbody>" + body + "</tbody></table></div>")
+    rows = c.get("faq_rows") or []
+    if rows:
+        h.A(f'<h3>All questions across the pages ({len(rows)})</h3><div class="tools"><input class="q" placeholder="Search questions…" oninput="search(this,\'faqm\')"></div>')
+        body = "".join(f'<tr><td>{esc(r["question"])}</td>' + "".join(h.td(b, _pill("Yes", "good") if r["present"][b] else '<span class="d0">—</span>') for b in h.order) + "</tr>" for r in rows)
+        h.A('<div class="tw" style="max-height:620px"><table class="cmp" id="faqm"><thead><tr>' + h.th("Question") + "</tr></thead><tbody>" + body + "</tbody></table></div>")
+    h.end()
 
 
-def links(h):
-    c, A = h.c, h.A
-    order, pages, qual = c["order"], c["pages"], c["quality"]
-    h.section("links", "Links &amp; images", "Internal links are on-page editorial links; navigation, header and footer links are excluded.")
-    A('<div class="tbl"><table class="mx"><thead><tr><th></th>' + h.th_brands() + '</tr></thead><tbody>')
-    for label, fn in (("Internal links (article body)", lambda b: internal_link_count(pages[b], qual)),
-                      ("Unique internal targets", lambda b: pages[b].get("unique_internal_targets")),
-                      ("External links", lambda b: pages[b].get("external_link_count")), ("Images", lambda b: pages[b].get("image_count"))):
-        A(f'<tr><td class="rowh">{label}</td>' + "".join(f'<td class="c{h.you(b)}">{fnum(fn(b))}</td>' for b in order) + '</tr>')
-    A('</tbody></table></div>')
-    lg = c["gaps"].get("link_gaps") or []
-    if lg:
-        from report_core import _norm
-        A(f'<h3>Internal-link gaps ({len(lg)})</h3><div class="tbl"><table class="mx"><thead><tr><th>Link target competitors use</th>' + h.th_brands() + '</tr></thead><tbody>')
-        for l in lg:
-            pi = {_norm(x) for x in l.get("present_in") or []}
-            A(f'<tr><td>{esc(l.get("topic_or_target"))}</td>' + "".join(h.yes(_norm(b) in pi, b) for b in order) + '</tr>')
-        A('</tbody></table></div>')
-    A('<h3>Links per page</h3>')
-    if h.p:
-        A('<p class="note">Every link with anchor text and section is in the HTML report and XLSX → Links.</p>')
-    else:
-        for b in order:
-            il, el = onpage_internal_links(pages[b]), pages[b].get("external_links") or []
-            rows = "".join(f'<tr><td>{kind}</td><td>{esc(l.get("anchor") or "")}</td><td>{esc(l.get("href") or "")}</td><td>{esc(l.get("section") or "")}</td></tr>'
-                           for kind, ls in (("Internal", il), ("External", el)) for l in ls)
-            h.details(f'<b>{esc(b)}</b><span class="muted">{len(il)} internal · {len(el)} external</span>',
-                      '<div class="tbl inner"><table class="linktbl"><thead><tr><th>Type</th><th>Anchor text</th><th>URL</th><th>Section</th></tr></thead>'
-                      f'<tbody>{rows}</tbody></table></div>')
-    A('<h3>Images per page</h3>')
-    if h.p:
-        A('<p class="note">Every image with its alt text is in the HTML report and XLSX → Images.</p>')
-    else:
-        for b in order:
-            im = pages[b].get("images") or []
-            rows = "".join(f'<tr><td>{esc(i.get("alt") or "") or "<span class=muted>(none)</span>"}</td><td>{esc(i.get("src") or "")}</td></tr>' for i in im)
-            h.details(f'<b>{esc(b)}</b><span class="muted">{len(im)} images · {sum(1 for i in im if not (i.get("alt") or "").strip())} without alt text</span>',
-                      f'<div class="tbl inner"><table class="linktbl"><thead><tr><th>Alt text</th><th>Image</th></tr></thead><tbody>{rows}</tbody></table></div>')
-    A('</section>')
+def claims(h):
+    h.section("claims", "10", "Figures & claims", "Prices, ratios, discounts, plan features and riders exactly as each page states them.")
+    h.A('<div class="cols2">')
+    for b in h.order:
+        p = h.pages[b]
+        nums, feats = p.get("numbers") or [], p.get("features_or_riders") or []
+        h.A(f'<div class="card{" us" if b == h.you else ""}"><h4 style="margin-top:0">{h.label(b)}</h4>'
+            + (f'<div class="small" style="font-weight:600">Figures stated ({len(nums)})</div><ul class="plain">' + "".join(f"<li>{esc(x)}</li>" for x in nums) + "</ul>" if nums else "")
+            + (f'<div class="small" style="font-weight:600;margin-top:10px">Plans, features &amp; riders ({len(feats)})</div><ul class="plain">' + "".join(f"<li>{esc(x)}</li>" for x in feats) + "</ul>" if feats else "")
+            + "</div>")
+    h.A("</div>")
+    h.end()
 
 
-def actions(h):
-    c, A = h.c, h.A
-    h.section("actions", "Recommendations", "Highest-priority gaps with the recommended fix and the competitor page that does it best. "
-                                             "Page-speed fixes are listed in section 2.")
-    A('<div class="tbl"><table><thead><tr><th class="num">#</th><th>Priority</th><th>Area</th><th>Action</th><th>Best example</th></tr></thead><tbody>')
-    top = [g for g in c["gap_list"] if g.get("recommendation")]
-    top = [g for g in top if int(g.get("priority") or 0) == 3] or top[:10]
-    for i, g in enumerate(top, 1):
-        p = PRIORITY_LABEL.get(int(g.get("priority") or 0), "")
-        A(f'<tr><td class="num">{i}</td><td><span class="pill {p.lower()}">{p}</span></td><td class="nowrap">{esc((g.get("type") or "").title())}</td>'
-          f'<td><b style="color:var(--ink)">{esc(g.get("title"))}</b><br>{esc(g.get("recommendation"))}</td><td class="nowrap">{esc(g.get("exemplar_brand") or "")}</td></tr>')
-    A('</tbody></table></div></section>')
+def page_detail(h, b, idx):
+    c, p = h.c, h.pages[b]
+    hc = c["hcounts"][b]
+    h.A(f'<section id="{h.pid(b)}"><h2><span class="n">P{idx}</span>{esc(h.name(b))}'
+        + ('<span class="us-tag">OUR PAGE</span>' if b == h.you else "") + "</h2>")
+    h.A(f'<p class="lede"><a class="mono" href="{esc(p.get("url"))}" target="_blank" rel="noopener">{esc(p.get("url"))}</a></p>')
+    m, d = psi_rec(c, b, "mobile"), psi_rec(c, b, "desktop")
+    sc = lambda r, k: (_pill((r.get("scores") or {}).get(k), rate("score", (r.get("scores") or {}).get(k))) if r and (r.get("scores") or {}).get(k) is not None else _pill("n/a", "na"))
+    kv = [("Title tag", esc(p.get("title")) or "—"), ("Meta description", esc(p.get("meta_description")) or "—"),
+          ("H1", esc(p.get("h1")) if p.get("h1") else _pill("No H1", "poor")),
+          ("Headings", f"H1 {hc[1]} · H2 {hc[2]} · H3 {hc[3]} · H4 {hc[4]}"),
+          ("Words · tables · FAQs", f'{_int(p.get("word_count_total")):,} words · {_int(p.get("tables_count"))} tables · {len(p.get("faqs") or [])} FAQs'),
+          ("Lighthouse (mobile)", " ".join(f'{lab} {sc(m, k)}' for k, lab in CATS)),
+          ("Lighthouse (desktop)", " ".join(f'{lab} {sc(d, k)}' for k, lab in CATS)),
+          ("Structured data", ", ".join(esc(s) for s in p.get("schema_types") or []) or "None found"),
+          ("Robots meta", esc(p.get("robots_meta")) or "Not set"),
+          ("Author / reviewer", esc(" / ".join(x for x in (p.get("author"), p.get("reviewer")) if x)) or "Not named")]
+    h.A('<div class="kv">' + "".join(f"<div>{esc(k)}</div><div>{v}</div>" for k, v in kv) + "</div>")
+    outline = p.get("heading_outline") or []
+    h.A(f'<details class="topic"{" open" if h.p else ""}><summary><b>Heading outline ({len(outline)} headings)</b></summary><div style="padding:12px 16px"><ul class="ol">'
+        + "".join(f'<li class="l{_int(x.get("level"))}"><span class="tag h{_int(x.get("level"))}">H{_int(x.get("level"))}</span><span>{esc(x.get("text"))}</span></li>' for x in outline)
+        + "</ul></div></details>")
+    secs = [s for s in p.get("sections") or [] if _sec_text(s) or s.get("summary")]
+    h.A(f'<details class="topic" open><summary><b>Page content by section ({len(secs)} sections)</b></summary><div style="padding:14px 18px">')
+    for s in secs:
+        lvl = _int(s.get("level"))
+        tag = f'<span class="tag h{lvl}">H{lvl}</span>' if lvl else '<span class="tag">Intro</span>'
+        text = _sec_text(s)
+        body = esc(text) if text else f'<span class="nc">{esc(s.get("summary"))}</span>'
+        h.A(f'<div class="sec"><h5>{tag}<span>{esc(s.get("heading") or "(introduction)")}</span></h5><p>{body}</p></div>')
+    h.A("</div></details>")
+    fq = p.get("faqs") or []
+    if fq:
+        h.A(f'<details class="topic"{" open" if h.p else ""}><summary><b>FAQs ({len(fq)})</b></summary><div style="padding:12px 16px">')
+        cats = {}
+        for f in fq:
+            cats.setdefault(f.get("category") or "", []).append(f)
+        for cat, items in cats.items():
+            if cat:
+                h.A(f"<h4>{esc(cat)} ({len(items)})</h4>")
+            for f in items:
+                h.A(f'<details class="faq"{" open" if h.p else ""}><summary>{esc(f.get("question"))}</summary><div>{esc(f.get("answer"))}</div></details>')
+        h.A("</div></details>")
+    ex = p.get("examples") or []
+    if ex:
+        h.A(f'<details class="topic"{" open" if h.p else ""}><summary><b>Worked examples and illustrations ({len(ex)})</b></summary><div style="padding:12px 16px">'
+            '<div class="tw"><table><thead><tr><th>Context</th><th>Figures</th></tr></thead><tbody>'
+            + "".join(f'<tr><td>{esc(e.get("context"))}</td><td>{esc(e.get("figures"))}</td></tr>' for e in ex) + "</tbody></table></div></div></details>")
+    links = onpage_internal_links(p)
+    ext = p.get("external_links") or []
+    h.A(f'<details class="topic"{" open" if h.p else ""}><summary><b>Links ({len(links)} internal in content · {len(ext)} external)</b></summary><div style="padding:12px 16px">'
+        '<div class="tw" style="max-height:480px"><table><thead><tr><th>Anchor text</th><th>Target</th><th>Section</th><th>Type</th></tr></thead><tbody>'
+        + "".join(f'<tr><td>{esc(l.get("anchor") or "(no text)")}</td><td class="mono">{esc(l.get("href"))}</td><td>{esc(l.get("section"))}</td>'
+                  f'<td>{"Internal" if l.get("internal") else "External"}</td></tr>' for l in links + ext)
+        + "</tbody></table></div></div></details>")
+    imgs = p.get("images") or []
+    h.A(f'<details class="topic"{" open" if h.p else ""}><summary><b>Images ({len(imgs)}, {sum(1 for i in imgs if i.get("alt"))} with alt text)</b></summary><div style="padding:12px 16px">'
+        '<div class="tw" style="max-height:420px"><table><thead><tr><th>Alt text</th><th>Source</th></tr></thead><tbody>'
+        + "".join(f'<tr><td>{esc(i.get("alt")) or _pill("No alt", "na")}</td><td class="mono">{esc(i.get("src"))}</td></tr>' for i in imgs)
+        + "</tbody></table></div></div></details>")
+    h.A("</section>")
 
 
 def method(h):
-    c, A = h.c, h.A
-    psi, auth = c["psi"], c["auth"]
-    rows = [("Page crawl (raw HTML)", "Headings, section content, FAQs, links, images, meta tags, structured data", "Collected"),
-            ("Gap analysis", "Topic clustering, depth, gaps, priorities, quality signals", "Collected"),
-            ("Web search", "Competitor discovery and ranking check", "Collected" if c["ranking"] else "Not run"),
-            ("Google PageSpeed Insights API v5", "Core Web Vitals (CrUX real users), Lighthouse lab metrics and scores",
-             f'Collected {(psi.get("fetched_at") or "")[:10]} · {psi.get("summary", {}).get("succeeded", "?")}/{psi.get("summary", {}).get("requested", "?")} measurements' if psi else "Not available yet"),
-            ("Ahrefs API v3 (Site Explorer)", "URL/Domain Rating, backlinks, referring domains, organic traffic and keywords",
-             f'Collected {(auth.get("fetched_at") or "")[:10]} · {auth.get("country", "")} database' if auth else "Not available yet"),
-            ("Semrush", "Additional keyword and traffic data", "Not included")]
-    h.section("method", "Method &amp; data sources", pb=False)
-    A('<div class="tbl"><table><thead><tr><th>Source</th><th>What it provides</th><th>Status</th></tr></thead><tbody>'
-      + "".join(f'<tr><td>{a}</td><td>{b}</td><td>{esc(s)}</td></tr>' for a, b, s in rows) + '</tbody></table></div>'
-      '<p class="note">Thresholds: Google Core Web Vitals (LCP 2.5 s / 4.0 s, INP 200 ms / 500 ms, CLS 0.10 / 0.25) and Lighthouse scoring. '
-      'Content analysis describes gaps and briefs only; it never produces publishable copy.</p></section>')
+    c, meta = h.c, h.meta
+    psi = c.get("psi") or {}
+    h.A('<section id="method"><h2><span class="n">A</span>Method &amp; sources</h2>')
+    items = [
+        f"Pages: fetched on {esc(meta.get('created_at') or '')}; headings, links, images, tables and structured data parsed from the raw HTML; "
+        "each section then read for its meaning, FAQs, examples and figures.",
+        "Topics: sections from all pages grouped into shared topics; each page scored per topic as Deep, Standard, Mention or not covered.",
+        "FAQs: questions grouped across pages when they ask the same thing in different words.",
+        "Search visibility: organic results recorded for each search query; positions vary by location, device and date.",
+        f"Page speed: {esc(psi.get('source') or 'not collected')}.",
+    ]
+    if not c.get("auth"):
+        items.append("Authority metrics (backlinks, domain rating) are not included: no Ahrefs data was collected for this run.")
+    h.A("<ul class=plain>" + "".join(f"<li>{x}</li>" for x in items) + "</ul>")
+    h.A(f'<p class="foot">Generated {datetime.now().strftime("%d %b %Y, %H:%M")} · run folder: {esc(c.get("run_name"))}</p></section>')
+
+
+# ----------------------------------------------------------------------------- entry
+def render(ctx, print_mode=False):
+    h = R(ctx, print_mode)
+    title = f'{(ctx["topic"] or "Content").title()} — Competitive Content Comparison'
+    h.A(f'<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+        f'<title>{esc(title)}</title><style>{CSS}</style></head><body>')
+    nav(h)
+    h.A("<main>")
+    header(h)
+    for fn in (summary, pages_compared, visibility, speed, onpage, headings, topic_cov, content, faqs, claims):
+        fn(h)
+    for i, b in enumerate(h.order, 1):
+        page_detail(h, b, i)
+    method(h)
+    h.A(f"</main><script>{JS}</script></body></html>")
+    return "".join(h.out)

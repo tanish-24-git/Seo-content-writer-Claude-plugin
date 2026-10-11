@@ -2,6 +2,7 @@
 """Core Web Vitals for every page in a run, via Google PageSpeed Insights v5.
 
     python fetch_pagespeed.py <run_dir> [--strategies mobile,desktop] [--workers 4] [--refresh]
+                              [--engine auto|psi|lighthouse]
 
 Reads meta.json (your_url + competitors[].url) and writes <run_dir>/pagespeed.json:
 lab metrics (Lighthouse), real-user field metrics (CrUX p75, 28-day window) when
@@ -13,6 +14,15 @@ Auth, first match wins (the PSI API itself is free; a credential only lifts quot
   PSI_SERVICE_ACCOUNT_JSON    path to a service-account key file (needs `google-auth`)
   (none)                      keyless: works, but Google rate-limits it hard
 
+Engines:
+  psi         PageSpeed Insights only.
+  lighthouse  Local Lighthouse (`npx lighthouse`, the engine PSI runs) against a local
+              Chrome/Edge — lab data and category scores, no CrUX field data.
+  auto        (default) PSI first; any page/device that fails on quota (429) or the
+              network is re-measured with local Lighthouse when Chrome/Edge and npx
+              are available. Local runs are sequential so CPU contention does not skew
+              the performance score. Set CHROME_PATH to pick the browser.
+
 Ported from the SEO platform's PSI adapter: shared token-bucket rate limiter,
 retry with Retry-After / jittered exponential backoff on 429/5xx, 7-day disk
 cache under <run_dir>/_cache/psi. Standard library only (google-auth optional).
@@ -23,7 +33,10 @@ import hashlib
 import json
 import os
 import random
+import shutil
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -41,6 +54,17 @@ RETRYABLE = {429, 500, 502, 503}
 CACHE_TTL = 7 * 24 * 3600
 TIMEOUT = 120
 MAX_RETRIES = 4
+LIGHTHOUSE_PKG = os.environ.get("LIGHTHOUSE_PKG", "lighthouse@13.4.1")
+LIGHTHOUSE_TIMEOUT = 300
+CHROME_CANDIDATES = (
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+    r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+    "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable", "/usr/bin/chromium", "/usr/bin/chromium-browser",
+)
 
 
 def now_iso():
@@ -243,22 +267,76 @@ class Cache:
             pass
 
 
-def measure(url, strategy, auth, limiter, cache):
-    rec = cache.get(url, strategy)
+def find_chrome():
+    """Path to a local Chrome/Edge for Lighthouse, or None."""
+    env = os.environ.get("CHROME_PATH")
+    if env and os.path.exists(env):
+        return env
+    for p in CHROME_CANDIDATES:
+        if os.path.exists(p):
+            return p
+    for name in ("google-chrome", "chromium", "chromium-browser", "chrome", "msedge"):
+        p = shutil.which(name)
+        if p:
+            return p
+    return None
+
+
+def lighthouse_raw(url, strategy, chrome):
+    """Run Lighthouse locally; returns ({"lighthouseResult": lhr}, None) or (None, error)."""
+    npx = shutil.which("npx") or shutil.which("npx.cmd")
+    if not npx:
+        return None, "lighthouse: npx not found (install Node.js)"
+    with tempfile.TemporaryDirectory() as td:
+        out = os.path.join(td, "lh.json")
+        cmd = [npx, "--yes", LIGHTHOUSE_PKG, url, "--output=json", f"--output-path={out}", "--quiet",
+               "--only-categories=" + ",".join(CATEGORIES),
+               "--chrome-flags=--headless=new --no-first-run --no-default-browser-check"]
+        if strategy == "desktop":
+            cmd.append("--preset=desktop")
+        try:
+            proc = subprocess.run(cmd, env=dict(os.environ, CHROME_PATH=chrome), capture_output=True,
+                                  text=True, encoding="utf-8", errors="replace", timeout=LIGHTHOUSE_TIMEOUT)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return None, f"lighthouse: {type(exc).__name__}: {exc}"[:300]
+        # On Windows Lighthouse can exit non-zero after writing the report (EPERM while
+        # deleting its temp Chrome profile), so trust the report file, not the exit code.
+        if not os.path.exists(out):
+            return None, f"lighthouse exit {proc.returncode}: {(proc.stderr or proc.stdout)[-280:]}"
+        try:
+            with open(out, encoding="utf-8") as fh:
+                return {"lighthouseResult": json.load(fh)}, None
+        except ValueError as exc:
+            return None, f"lighthouse json: {exc}"
+
+
+def measure(url, strategy, auth, limiter, cache, engine="psi", chrome=None):
+    key = url if engine == "psi" else f"lighthouse|{url}"
+    rec = cache.get(key, strategy)
     if rec is not None:
         rec["cached"] = True
         return rec
     t0 = time.monotonic()
-    data, err = fetch_raw(url, strategy, auth, limiter)
+    if engine == "psi":
+        data, err = fetch_raw(url, strategy, auth, limiter)
+    else:
+        data, err = lighthouse_raw(url, strategy, chrome)
     if err:
-        return {"error": err, "fetched_at": now_iso()}
+        return {"error": err, "engine": engine, "fetched_at": now_iso()}
     rec = parse(data)
-    rec.update(fetched_at=now_iso(), latency_ms=int((time.monotonic() - t0) * 1000), cached=False)
+    rec.update(engine=engine, fetched_at=now_iso(), latency_ms=int((time.monotonic() - t0) * 1000), cached=False)
     if rec.get("runtime_error"):
         rec["error"] = "lighthouse: " + rec["runtime_error"][:280]
     else:
-        cache.put(url, strategy, rec)
+        cache.put(key, strategy, rec)
     return rec
+
+
+def needs_fallback(rec):
+    """PSI failures that local Lighthouse can stand in for (quota or network, not a bad URL)."""
+    err = (rec or {}).get("error") or ""
+    return bool(err) and (err.startswith("http 429") or "quota" in err.lower() or err.startswith("network:")
+                          or "retries exhausted" in err)
 
 
 def main():
@@ -268,6 +346,7 @@ def main():
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--qps", type=float, default=float(os.environ.get("PSI_QPS", "1.5")))
     ap.add_argument("--refresh", action="store_true", help="ignore the 7-day cache")
+    ap.add_argument("--engine", choices=("auto", "psi", "lighthouse"), default=os.environ.get("PSI_ENGINE", "auto"))
     a = ap.parse_args()
 
     with open(os.path.join(a.run_dir, "meta.json"), encoding="utf-8-sig") as fh:
@@ -279,21 +358,45 @@ def main():
 
     auth, limiter = Auth(), RateLimiter(a.qps)
     cache = Cache(os.path.join(a.run_dir, "_cache", "psi"), a.refresh)
-    print(f"PageSpeed: {len(pages)} pages x {len(strategies)} devices, auth={auth.mode}", file=sys.stderr)
+    chrome = find_chrome() if a.engine in ("auto", "lighthouse") else None
+    print(f"PageSpeed: {len(pages)} pages x {len(strategies)} devices, engine={a.engine}, auth={auth.mode}"
+          + (f", chrome={chrome}" if chrome else ""), file=sys.stderr)
     jobs = [(b, u, s) for b, u in pages for s in strategies]
     results = {}
-    with ThreadPoolExecutor(max_workers=max(1, a.workers)) as ex:
-        futs = {ex.submit(measure, u, s, auth, limiter, cache): (b, u, s) for b, u, s in jobs}
-        for f in futs:
-            b, u, s = futs[f]
-            try:
-                results[(b, s)] = f.result()
-            except Exception as exc:  # noqa: BLE001
-                results[(b, s)] = {"error": f"{type(exc).__name__}: {exc}"[:300]}
-            r = results[(b, s)]
-            print(f"  {s:7} {b}: " + (r["error"][:90] if r.get("error") else f'performance {r["scores"].get("performance")}'), file=sys.stderr)
 
-    out = {"source": "Google PageSpeed Insights API v5", "auth": auth.mode, "fetched_at": now_iso(),
+    def report(b, s):
+        r = results[(b, s)]
+        print(f"  {s:7} {b} [{r.get('engine', '?')}]: "
+              + (r["error"][:90] if r.get("error") else f'performance {r["scores"].get("performance")}'), file=sys.stderr)
+
+    if a.engine in ("auto", "psi"):
+        with ThreadPoolExecutor(max_workers=max(1, a.workers)) as ex:
+            futs = {ex.submit(measure, u, s, auth, limiter, cache): (b, u, s) for b, u, s in jobs}
+            for f in futs:
+                b, u, s = futs[f]
+                try:
+                    results[(b, s)] = f.result()
+                except Exception as exc:  # noqa: BLE001
+                    results[(b, s)] = {"error": f"{type(exc).__name__}: {exc}"[:300], "engine": "psi"}
+                report(b, s)
+    local = [(b, u, s) for b, u, s in jobs
+             if a.engine == "lighthouse" or (a.engine == "auto" and needs_fallback(results.get((b, s))))]
+    if local and not chrome:
+        print("  local Lighthouse unavailable: no Chrome/Edge found (set CHROME_PATH)", file=sys.stderr)
+    elif local:
+        print(f"Lighthouse (local, sequential): {len(local)} page/device runs", file=sys.stderr)
+        for b, u, s in local:  # sequential on purpose: parallel runs skew the CPU-bound metrics
+            psi_err = (results.get((b, s)) or {}).get("error")
+            results[(b, s)] = measure(u, s, auth, limiter, cache, engine="lighthouse", chrome=chrome)
+            if psi_err:
+                results[(b, s)]["psi_error"] = psi_err[:160]
+            report(b, s)
+
+    engines = sorted({r.get("engine") for r in results.values() if r and not r.get("error")})
+    source = {"psi": "Google PageSpeed Insights API v5",
+              "lighthouse": f"Lighthouse ({LIGHTHOUSE_PKG.split('@')[-1]}) run locally in headless Chrome"}
+    out = {"source": " + ".join(source[e] for e in engines) or "Google PageSpeed Insights API v5",
+           "engines": engines, "auth": auth.mode, "fetched_at": now_iso(),
            "strategies": strategies,
            "pages": [{"brand": b, "url": u, **{s: results.get((b, s)) for s in strategies}} for b, u in pages]}
     ok = sum(1 for v in results.values() if not v.get("error"))
