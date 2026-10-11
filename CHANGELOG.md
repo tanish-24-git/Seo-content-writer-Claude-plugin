@@ -5,9 +5,11 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [0.8.0] — 2026-10-11
 ### Changed — comparison-only stakeholder HTML report
-- **`report.html` redesigned** (`scripts/report_html.py`) for senior stakeholders: white / light-blue
-  theme with a yellow accent for your page, a **fixed sidebar index** with active-section
-  highlighting, and a reading column. Sections: summary scorecard + factual observations, pages
+- **`report.html` redesigned** (`scripts/report_html.py`) for senior stakeholders: light-blue and
+  white only, plain tables, statuses in words (Covered / Mentioned / Not covered; Good / Needs
+  improvement / Poor) instead of colours, percentages for coverage and alt text, a **fixed sidebar
+  index** with active-section highlighting, and filters (key topics, topics our page lacks, our page
+  vs one competitor). Sections: summary in three tables + factual observations, pages
   compared, search visibility per query (full result lists), page speed (Lighthouse scores and lab
   Core Web Vitals, mobile and desktop; CrUX field data when present), on-page SEO (title, meta, H1,
   robots, canonical, schema, phrase placement), heading structure (H1–H4 counts, missing / multiple
